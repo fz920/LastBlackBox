@@ -34,7 +34,7 @@ the buttons. Releasing all directions stops it. **Stop** also releases driver co
 
 Curves use a servo offset of 12 on the outside wheel and 6 on the inside wheel.
 These are control settings, not measured wheel speeds; the actual curve depends
-on the servos, surface and load. The server requires **NB3-DEMO-2** firmware,
+on the servos, surface and load. The server requires **NB3-DEMO-3** firmware,
 so re-upload the sketch when upgrading from the initial controller version.
 
 If school Wi-Fi blocks connections between devices, use a shared local hotspot
@@ -43,7 +43,10 @@ or another network that permits device-to-device connections.
 ## Enable the Arduino
 
 The included sketch is for **Arduino Nano + continuous-rotation servos**, with
-right servo on D9 and left servo on D10, matching the remote-NB3 tutorial.
+physical left servo on D9 and right servo on D10, as confirmed on this robot.
+This is the opposite pin assignment to the remote-NB3 tutorial. Forward motion
+uses a lower signal on D9 and a higher signal on D10, preserving the user's
+confirmed travel toward the camera. Steering acts on the physical wheel labels.
 It is **not** the DC-motor/H-bridge sketch. Keep motors disconnected during upload.
 
 With Arduino CLI and its AVR core / Servo library installed:
@@ -77,7 +80,13 @@ Raise the wheels before reconnecting motor power. Check that neutral stops both
 servos and that the four directions match the buttons. Continuous-rotation servos
 may need neutral calibration: adjust `LEFT_NEUTRAL` / `RIGHT_NEUTRAL` in the sketch
 and re-upload. The demo uses offsets of 12 from neutral instead of the tutorial's
-90; actual speed depends on the servos and load.
+90; actual speed depends on the servos and load. These stop and straight-drive
+values have been preserved during the pin-mapping correction. A reported speed
+imbalance reverses sides when reversing; calibration in both rotation directions
+is still needed. The current `Servo.write(90)` maps to about 1472 microseconds
+with the installed library, which may differ from the servo's specified neutral.
+Confirm the motor model before changing it; equal command offsets are not proof
+of equal wheel speeds.
 
 ## Video and disconnect behaviour
 

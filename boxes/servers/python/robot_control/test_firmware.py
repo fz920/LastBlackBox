@@ -21,7 +21,7 @@ unsigned long nowMs=0;
 unsigned long millis(){return nowMs;}
 void pinMode(int,int){}
 void digitalWrite(int,int){}
-struct Servo {int value=0; void attach(int){} void write(int v){value=v;}};
+struct Servo {int value=0,pin=-1; void attach(int p){pin=p;} void write(int v){value=v;}};
 struct SerialMock {
   std::deque<char> input; std::string reply;
   void begin(int){} bool available(){return !input.empty();}
@@ -34,15 +34,16 @@ void command(char c){Serial.input.push_back(c);loop();}
 void wheels(int l,int r){assert(leftMotor.value==l);assert(rightMotor.value==r);}
 int main(){
   setup(); wheels(90,90); assert(!moving);
-  command('f'); wheels(102,78);
-  command('e'); wheels(102,84); // Forward-right: left wheel faster
-  command('f'); wheels(102,78); // Release right, keep forward
-  command('q'); wheels(96,78);  // Forward-left: right wheel faster
-  command('b'); wheels(78,102);
-  command('z'); wheels(84,102); // Reverse, rear curves left
-  command('c'); wheels(78,96);  // Reverse, rear curves right
-  command('l'); wheels(78,78);
-  command('r'); wheels(102,102);
+  assert(leftMotor.pin==9 && rightMotor.pin==10);
+  command('f'); wheels(78,102); // Preserve the confirmed physical forward signals
+  command('e'); wheels(78,96);  // Forward-right: reduce the physical right wheel
+  command('f'); wheels(78,102); // Release right, keep forward
+  command('q'); wheels(84,102); // Forward-left: reduce the physical left wheel
+  command('b'); wheels(102,78);
+  command('z'); wheels(96,78);  // Reverse, rear curves left
+  command('c'); wheels(102,84); // Reverse, rear curves right
+  command('l'); wheels(102,102);
+  command('r'); wheels(78,78);
   command('x'); wheels(90,90); assert(!moving);
   // Every curved movement must stop if its commands stop arriving.
   for(char c : {'q','e','z','c'}){
@@ -53,7 +54,7 @@ int main(){
   }
   command('e'); command('!'); wheels(90,90); assert(!moving);
   command('?');
-  assert(Serial.reply=="NB3-DEMO-2 SERVO WATCHDOG=600 SPEED=12 STEERING=1");
+  assert(Serial.reply=="NB3-DEMO-3 SERVO WATCHDOG=600 SPEED=12 LEFT=9 RIGHT=10");
 }
 ''')
             subprocess.run(["g++", "-I", directory, str(root / "check.cpp"),

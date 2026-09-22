@@ -231,7 +231,7 @@ def connect_arduino(path):
         port.write(b"x?")  # STOP and identify; never probe with a movement command.
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if port.readline().strip() == b"NB3-DEMO-2 SERVO WATCHDOG=600 SPEED=12 STEERING=1":
+            if port.readline().strip() == b"NB3-DEMO-3 SERVO WATCHDOG=600 SPEED=12 LEFT=9 RIGHT=10":
                 return port
         raise RuntimeError("Demo firmware not detected. Upload arduino/robot_demo first, or run without --serial for preview.")
     except Exception:
