@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NB3 · Robot control</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand"><span class="logo" aria-hidden="true">n<span>b</span>3</span><div><p class="eyebrow">THE LAST BLACK BOX</p><h1>Robot control</h1></div></div>
+      <span id="connection" class="badge">Connecting…</span>
+    </header>
+    <div class="workspace">
+      <section class="camera-panel" aria-label="Robot camera">
+        <div class="panel-heading"><h2>Through the robot’s eyes</h2><span id="live" class="badge">Waiting for video</span></div>
+        <div class="viewfinder">
+          <img id="camera" alt="Live view from the robot camera" hidden>
+          <div class="crosshair" aria-hidden="true"></div>
+          <div id="video-message" role="status">Connecting to the camera…</div>
+          <span class="camera-label">NB3 / FRONT CAMERA</span>
+        </div>
+        <div class="camera-footer"><span>640 × 480 <span class="muted">/ Live preview</span></span><button id="flip" class="text-button">Flip vertically</button></div>
+      </section>
+      <section class="controls-panel" aria-label="Driving controls">
+        <p class="eyebrow">YOU’RE IN THE DRIVER’S SEAT</p>
+        <h2>A little push.<br>A new perspective.</h2>
+        <p class="intro">Hold a direction to move.<br>Let go to stop.</p>
+        <div id="mode" class="mode">Checking robot…</div>
+        <button id="claim" class="claim" disabled>Take control</button>
+        <div class="dpad" aria-label="Direction pad">
+          <button data-direction="forward" class="direction forward" aria-label="Move forward" disabled><span aria-hidden="true">↑</span><small>FORWARD</small></button>
+          <button data-direction="left" class="direction left" aria-label="Turn left" disabled><span aria-hidden="true">←</span><small>LEFT</small></button>
+          <div class="pad-center" aria-hidden="true">✦</div>
+          <button data-direction="right" class="direction right" aria-label="Turn right" disabled><span aria-hidden="true">→</span><small>RIGHT</small></button>
+          <button data-direction="backward" class="direction backward" aria-label="Move backward" disabled><span aria-hidden="true">↓</span><small>BACK</small></button>
+        </div>
+        <button id="stop" class="stop"><span aria-hidden="true">■</span> STOP <kbd>SPACE</kbd></button>
+        <div class="command"><span>LAST COMMAND SENT</span><strong id="command">—</strong></div>
+        <p id="notice" class="notice" role="status" aria-live="polite">Waiting for connection.</p>
+      </section>
+    </div>
+    <footer><span><b>Try it:</b> park on a marked spot using only the camera.</span><span>Arrow keys or WASD <span class="separator">·</span> One driver at a time</span></footer>
+  </main>
+</body>
+</html>
