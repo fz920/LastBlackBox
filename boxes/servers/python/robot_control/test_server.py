@@ -63,6 +63,25 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.robot.control(token, 2, "left", self.now)
 
+    def test_steering_sequence_keeps_remaining_direction_then_stops(self):
+        token = self.robot.claim()
+        for sequence, command in enumerate(["forward", "forward_right", "forward", "stop"], 1):
+            self.robot.control(token, sequence, command, self.now)
+        self.assertEqual(self.serial.commands, [b"x", b"f", b"e", b"f", b"x"])
+
+    def test_each_curve_uses_its_protocol_byte_and_times_out(self):
+        for command, byte in [("forward_left", b"q"), ("forward_right", b"e"),
+                              ("backward_left", b"z"), ("backward_right", b"c")]:
+            with self.subTest(command=command):
+                self.frames.timestamp = self.now
+                token = self.robot.claim()
+                self.robot.control(token, 1, command, self.now)
+                self.assertEqual(self.serial.commands[-1], byte)
+                self.now += WATCHDOG + 0.01
+                self.robot.tick()
+                self.assertEqual(self.serial.commands[-1], b"x")
+                self.assertIsNone(self.robot.owner)
+
     def test_idle_driver_lease_expires(self):
         self.robot.claim()
         self.now += LEASE + 0.01
@@ -147,6 +166,7 @@ class HTTPTests(unittest.TestCase):
 
     def test_static_allowlist(self):
         self.assertEqual(self.request("/")[0], 200)
+        self.assertEqual(self.request("/steering.js")[0], 200)
         self.assertEqual(self.request("/../server.py")[0], 404)
         self.assertEqual(self.request("/command/forward")[0], 404)
 
@@ -161,7 +181,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         token = json.loads(data)["token"]
         self.frames.write(b"jpeg")
-        command = {"token": token, "sequence": 1, "command": "forward", "frame_time": self.frames.timestamp}
+        command = {"token": token, "sequence": 1, "command": "forward_right", "frame_time": self.frames.timestamp}
         self.assertEqual(self.request("/api/control", command, headers)[0], 200)
         self.assertEqual(self.request("/api/stop", {}, headers)[0], 200)
         command["sequence"] = 2

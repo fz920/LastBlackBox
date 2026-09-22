@@ -13,7 +13,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
-COMMANDS = {"forward": b"f", "backward": b"b", "left": b"l", "right": b"r", "stop": b"x"}
+COMMANDS = {
+    "forward": b"f", "backward": b"b", "left": b"l", "right": b"r", "stop": b"x",
+    "forward_left": b"q", "forward_right": b"e",
+    "backward_left": b"z", "backward_right": b"c",
+}
 WATCHDOG = 0.5
 LEASE = 2.0
 FRAME_MAX_AGE = 1.2
@@ -182,6 +186,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, data, "image/jpeg", {"X-Frame-Time": timestamp, "X-Frame-Number": number})
         files = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/style.css": ("style.css", "text/css"),
+                 "/steering.js": ("steering.js", "text/javascript"),
                  "/app.js": ("app.js", "text/javascript")}
         if path not in files:
             return self.reply(404, {"error": "Not found"})
@@ -226,7 +231,7 @@ def connect_arduino(path):
         port.write(b"x?")  # STOP and identify; never probe with a movement command.
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if port.readline().strip() == b"NB3-DEMO-1 SERVO WATCHDOG=600 SPEED=12":
+            if port.readline().strip() == b"NB3-DEMO-2 SERVO WATCHDOG=600 SPEED=12 STEERING=1":
                 return port
         raise RuntimeError("Demo firmware not detected. Upload arduino/robot_demo first, or run without --serial for preview.")
     except Exception:

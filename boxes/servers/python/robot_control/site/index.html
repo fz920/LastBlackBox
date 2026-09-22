@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NB3 · Robot control</title>
   <link rel="stylesheet" href="/style.css">
+  <script src="/steering.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -27,7 +28,7 @@
       <section class="controls-panel" aria-label="Driving controls">
         <p class="eyebrow">YOU’RE IN THE DRIVER’S SEAT</p>
         <h2>A little push.<br>A new perspective.</h2>
-        <p class="intro">Hold a direction to move.<br>Let go to stop.</p>
+        <p class="intro">Hold ↑ + → to curve right.<br>Release all directions to stop.</p>
         <div id="mode" class="mode">Checking robot…</div>
         <button id="claim" class="claim" disabled>Take control</button>
         <div class="dpad" aria-label="Direction pad">
@@ -42,7 +43,7 @@
         <p id="notice" class="notice" role="status" aria-live="polite">Waiting for connection.</p>
       </section>
     </div>
-    <footer><span><b>Try it:</b> park on a marked spot using only the camera.</span><span>Arrow keys or WASD <span class="separator">·</span> One driver at a time</span></footer>
+    <footer><span><b>Try it:</b> hold forward + left or right to steer. Two fingers work too.</span><span>Arrow keys or WASD <span class="separator">·</span> One driver at a time</span></footer>
   </main>
 </body>
 </html>

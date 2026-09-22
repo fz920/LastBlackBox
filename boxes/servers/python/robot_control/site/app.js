@@ -3,7 +3,8 @@ const $ = id => document.getElementById(id);
 const directions = [...document.querySelectorAll("[data-direction]")];
 let token = null, sequence = 0, desired = "stop", online = false, claiming = false;
 let state = null, lastVideo = 0, frameTime = 0, frameNumber = 0, objectURL = null;
-let pressedKey = null, pressedPointer = null, controlBusy = false;
+const steering = new SteeringInput();
+let controlBusy = false;
 const fresh = () => performance.now() - lastVideo < 1000 && lastVideo > 0;
 
 async function api(path, body, keepalive = false) {
@@ -28,18 +29,17 @@ function render() {
   $("claim").classList.toggle("owned", Boolean(token));
   for (const button of directions) {
     button.disabled = !online || !token || !fresh();
-    button.classList.toggle("active", desired === button.dataset.direction);
+    button.classList.toggle("active", desired.split("_").includes(button.dataset.direction));
   }
   if (state) {
     $("mode").textContent = state.mode === "preview" ? "Preview mode · motor output disabled" : (state.fault ? "Arduino disconnected" : "Arduino connected · gentle speed");
-    $("command").textContent = online ? state.command : "Unknown";
+    $("command").textContent = online ? state.command.replaceAll("_", " ") : "Unknown";
   }
 }
 
 function clearInput() {
   desired = "stop";
-  pressedKey = null;
-  pressedPointer = null;
+  steering.clear();
   render();
 }
 
@@ -70,9 +70,13 @@ async function sendControl(force = false) {
   }
 }
 
-function releaseDirection() {
-  clearInput();
-  sendControl(true); // Send release immediately, even if a heartbeat is in flight.
+function updateDirection() {
+  const next = steering.command;
+  if (next === desired) return;
+  desired = next;
+  render();
+  // Releases and steering changes supersede any heartbeat already in flight.
+  sendControl(true);
 }
 
 async function emergencyStop(message = "Stopped. Take control when you’re ready.") {
@@ -91,7 +95,7 @@ $("claim").addEventListener("click", async () => {
     const result = await api("/api/claim", {});
     token = result.token;
     sequence = 0;
-    $("notice").textContent = "You have control. Hold a direction to move.";
+    $("notice").textContent = "You have control. Hold ↑ + → to curve right.";
     sendControl(true);
   } catch (error) {$("notice").textContent = error.message;}
   finally {claiming = false; render();}
@@ -99,21 +103,20 @@ $("claim").addEventListener("click", async () => {
 
 for (const button of directions) {
   button.addEventListener("pointerdown", event => {
-    if (event.button !== 0 || !token || !fresh() || pressedPointer !== null || pressedKey !== null) return;
+    if (event.button !== 0 || !online || !token || !fresh()) return;
     event.preventDefault();
-    pressedPointer = event.pointerId;
+    steering.pointers.set(event.pointerId, button.dataset.direction);
     button.setPointerCapture(event.pointerId);
-    desired = button.dataset.direction;
-    render();
-    sendControl(true);
+    updateDirection();
   });
   for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) {
-    button.addEventListener(name, event => {if (pressedPointer === event.pointerId) releaseDirection();});
+    button.addEventListener(name, event => {
+      if (steering.pointers.delete(event.pointerId)) updateDirection();
+    });
   }
   button.addEventListener("contextmenu", event => event.preventDefault());
 }
 
-const keys = {ArrowUp: "forward", ArrowDown: "backward", ArrowLeft: "left", ArrowRight: "right", w: "forward", s: "backward", a: "left", d: "right"};
 window.addEventListener("keydown", event => {
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
   if (key === " " || key === "Escape") {
@@ -121,17 +124,15 @@ window.addEventListener("keydown", event => {
     if (!event.repeat) emergencyStop();
     return;
   }
-  if (!keys[key]) return;
+  if (!SteeringInput.keys[key] || event.ctrlKey || event.metaKey || event.altKey) return;
   event.preventDefault();
-  if (event.repeat || !token || !fresh() || pressedKey !== null || pressedPointer !== null) return;
-  pressedKey = key;
-  desired = keys[key];
-  render();
-  sendControl(true);
+  if (event.repeat || !online || !token || !fresh()) return;
+  steering.keys.add(key);
+  updateDirection();
 });
 window.addEventListener("keyup", event => {
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-  if (key === pressedKey) releaseDirection();
+  if (steering.keys.delete(key)) updateDirection();
 });
 $("stop").addEventListener("click", () => emergencyStop());
 $("flip").addEventListener("click", () => {

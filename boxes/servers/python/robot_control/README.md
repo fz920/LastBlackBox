@@ -18,7 +18,24 @@ On the Pi itself, use http://localhost:8000.
 
 The default is **preview mode**: live camera and simulated direction commands,
 with no serial port opened and no motor output. Press **Take control** to try
-the buttons. Releasing a direction stops it. **Stop** also releases driver control.
+the buttons. Releasing all directions stops it. **Stop** also releases driver control.
+
+## Steer while moving
+
+- Hold **↑ + →** (or **W + D**) to curve forward-right; **↑ + ←** curves left.
+- Release the turn key while holding forward to go straight again. Release all
+  directions to stop. Left/right alone still turn in place.
+- **↓ + ←/→** curves in reverse: the rear of the robot moves toward the selected
+  side. Both wheels reverse; this differs from which way the nose turns.
+- On a touchscreen, hold forward/back with one finger and left/right with another.
+  Keyboard and pointer inputs can also be combined.
+- Opposite inputs cancel on their axis: ↑ + ↓ stops forward/back movement,
+  and ← + → cancels turning.
+
+Curves use a servo offset of 12 on the outside wheel and 6 on the inside wheel.
+These are control settings, not measured wheel speeds; the actual curve depends
+on the servos, surface and load. The server requires **NB3-DEMO-2** firmware,
+so re-upload the sketch when upgrading from the initial controller version.
 
 If school Wi-Fi blocks connections between devices, use a shared local hotspot
 or another network that permits device-to-device connections.
@@ -39,8 +56,8 @@ With Arduino CLI and its AVR core / Servo library installed:
 The standard `arduino:avr:nano` target was compiled and successfully uploaded
 on this robot. Its previous firmware is backed up at
 `_tmp/robot-control/previous-firmware.hex` (about 77 KB). The firmware identification
-and Stop commands were verified after upload; physical wheel motion has not been
-tested because the motors are disconnected.
+and Stop commands were verified after upload. Basic physical movement was then
+confirmed by the user. The new steering combinations still need a physical check.
 
 For other Nanos with the old bootloader, use `arduino:avr:nano:cpu=atmega328old`
 for both commands. Stop anything using the serial port before uploading.
@@ -74,7 +91,7 @@ and re-upload. The demo uses offsets of 12 from neutral instead of the tutorial'
   Server options `--flip vertical`, `--flip horizontal`, or `--flip both` adjust
   camera orientation for everyone. `both` rotates the image 180 degrees.
 - Video stale for around a second disables driving and is visibly marked.
-- Releasing input sends Stop immediately. Changing tabs, losing window focus,
+- Releasing all directions sends Stop immediately. Changing tabs, losing window focus,
   releasing control, or pressing Space/Escape sends Stop and releases control.
 - The Pi stops movement after 500 ms without control updates; the Arduino stops
   independently after 600 ms without movement commands, including USB loss or
@@ -96,7 +113,18 @@ serial failure, preview mode, and HTTP routes. Use `--no-camera` to inspect the
 unavailable-camera UI. Python's standard library handles HTTP; the only hardware
 packages needed are the Pi's `picamera2` and `pyserial`.
 
-During setup, all 15 server tests passed. Desktop and 390-pixel-wide mobile
+The Python suite also compiles the actual Arduino sketch against simulated servos
+when `g++` is available, checking all curved wheel outputs and their stop timeouts.
+Run the input-combination tests with `node test_steering.js` on a machine with
+Node.js (Node is not required to run the website).
+
+The steering update passed all 18 Python tests, 42 JavaScript input-combination
+assertions, and 17 checks of the actual input handlers using a fake DOM and
+mocked requests. Those checks include partial releases, keyboard aliases,
+opposing inputs, two-finger input, pointer cancellation, Stop, focus loss and
+stale video. Movement commands were tested only with simulated hardware.
+
+During the initial setup, all 15 server tests passed. Desktop and 390-pixel-wide mobile
 layouts, keyboard/touch release, single-driver control, focus loss, frozen
 video, and network loss passed Chromium interaction checks through a local
 request bridge (the Pi's automated Chromium networking stalled even on a
