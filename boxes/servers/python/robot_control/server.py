@@ -13,14 +13,44 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
+# The legacy letter protocol uses the opposite direction convention on this
+# robot. Full-speed commands use this corrected mapping. Calibrated slow mode
+# instead sends physical wheel outputs using WHEELS below.
 COMMANDS = {
-    "forward": b"f", "backward": b"b", "left": b"l", "right": b"r", "stop": b"x",
-    "forward_left": b"q", "forward_right": b"e",
-    "backward_left": b"z", "backward_right": b"c",
+    "forward": b"b", "backward": b"f", "left": b"r", "right": b"l", "stop": b"x",
+    "forward_left": b"z", "forward_right": b"c",
+    "backward_left": b"q", "backward_right": b"e",
 }
 WATCHDOG = 0.5
 LEASE = 2.0
 FRAME_MAX_AGE = 1.2
+FULL_SPEED_LIMIT = 2.0
+FIRMWARE_ID = b"NB3-DEMO-5 SERVO WATCHDOG=600 SPEED=12 FULL=90 LIMIT=2000 TRIM=24 LEFT=9 RIGHT=10"
+DEFAULT_CALIBRATION = {"left_forward": 12, "right_forward": 12,
+                       "left_backward": 12, "right_backward": 12}
+# Physical wheel directions; curves use half the calibrated inner-wheel offset.
+WHEELS = {"forward": (1, 1), "backward": (-1, -1),
+          "left": (-1, 1), "right": (1, -1),
+          "forward_left": (0.5, 1), "forward_right": (1, 0.5),
+          "backward_left": (-0.5, -1), "backward_right": (-1, -0.5)}
+
+
+def validate_calibration(values):
+    if not isinstance(values, dict) or values.keys() != DEFAULT_CALIBRATION.keys():
+        raise ValueError("Provide all four wheel settings")
+    if any(type(value) is not int or not 6 <= value <= 24 for value in values.values()):
+        raise ValueError("Wheel settings must be whole numbers from 6 to 24")
+    return dict(values)
+
+
+def slow_command(command, calibration):
+    angles = []
+    for wheel, direction, sign in zip(("left", "right"), WHEELS[command], (1, -1)):
+        offset = calibration[wheel + ("_forward" if direction > 0 else "_backward")]
+        # Round half offsets upward so an odd setting changes a curve predictably.
+        strength = offset if abs(direction) == 1 else (offset + 1) // 2
+        angles.append(90 + sign * (strength if direction > 0 else -strength))
+    return f"@{angles[0]:02X}{angles[1]:02X}\n".encode()
 
 
 class Frames(io.BufferedIOBase):
@@ -45,7 +75,7 @@ class Frames(io.BufferedIOBase):
 
 
 class Controller:
-    def __init__(self, frames, serial_port=None, clock=time.monotonic):
+    def __init__(self, frames, serial_port=None, clock=time.monotonic, calibration_path=None):
         self.frames = frames
         self.serial = serial_port
         self.clock = clock
@@ -57,18 +87,35 @@ class Controller:
         self.command = "stop"
         self.reason = "Ready"
         self.fault = ""
+        self.speed = "slow"
+        self.full_started = None
+        self.calibration_path = Path(calibration_path) if calibration_path else None
+        self.calibration = dict(DEFAULT_CALIBRATION)
+        if self.calibration_path and self.calibration_path.exists():
+            self.calibration = validate_calibration(json.loads(self.calibration_path.read_text()))
 
     def _send(self, command):
+        data = COMMANDS[command]
+        if self.speed == "full" and command != "stop":
+            data = data.upper()
+        elif command != "stop":
+            data = slow_command(command, self.calibration)
         if self.serial:
             try:
-                if self.serial.write(COMMANDS[command]) != 1:
+                if self.serial.write(data) != len(data):
                     raise OSError("Incomplete serial write")
             except Exception as exc:
                 self.fault = f"Arduino disconnected: {exc}"
                 self.owner = None
                 self.command = "stop"
+                self.speed = "slow"
+                self.full_started = None
                 self.reason = "Serial connection lost; Arduino timeout stops motors"
                 raise ValueError(self.fault) from exc
+        if command == "stop":
+            self.full_started = None
+        elif self.speed == "full" and self.full_started is None:
+            self.full_started = self.clock()
         self.command = command
 
     def _stop(self, reason, release=False):
@@ -79,27 +126,33 @@ class Controller:
         self.reason = reason
         if release:
             self.owner = None
+            self.speed = "slow"
 
     def tick(self):
         with self.lock:
             now = self.clock()
             _, timestamp, _, _ = self.frames.latest()
             if self.command != "stop":
-                if now - self.last_move > WATCHDOG:
+                if self.full_started is not None and now - self.full_started >= FULL_SPEED_LIMIT:
+                    self._stop("Full-speed test finished — take control to test again", release=True)
+                elif now - self.last_move > WATCHDOG:
                     self._stop("Control timed out — take control again", release=True)
                 elif now - timestamp > FRAME_MAX_AGE:
                     self._stop("Camera paused — take control again", release=True)
             if self.owner and now - self.last_contact > LEASE:
                 self._stop("Driver disconnected", release=True)
 
-    def claim(self):
+    def claim(self, speed="slow"):
         with self.lock:
             self.tick()
             if self.fault:
                 raise ValueError(self.fault)
             if self.owner:
                 raise ValueError("Someone else is driving. Ask them to release control.")
+            if speed not in ("slow", "full"):
+                raise ValueError("Choose slow or full speed")
             self._send("stop")
+            self.speed = speed
             self.owner = secrets.token_urlsafe(24)
             self.sequence = -1
             self.last_contact = self.clock()
@@ -135,6 +188,24 @@ class Controller:
         with self.lock:
             self._stop("Stopped — take control to drive again", release=True)
 
+    def set_calibration(self, values):
+        values = validate_calibration(values)
+        with self.lock:
+            self.tick()
+            if self.owner:
+                raise ValueError("Press Stop to release control before changing wheel settings")
+            self._send("stop")
+            if self.calibration_path:
+                try:
+                    self.calibration_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = self.calibration_path.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(values, indent=2) + "\n")
+                    temporary.replace(self.calibration_path)
+                except OSError as exc:
+                    raise ValueError(f"Could not save wheel settings: {exc}") from exc
+            self.calibration = values
+            self.reason = "Wheel settings saved. Take control to test slow speed."
+
     def status(self):
         with self.lock:
             self.tick()
@@ -142,8 +213,9 @@ class Controller:
             age = self.clock() - timestamp if number else None
             return {"mode": "robot" if self.serial else "preview",
                     "arduino": "disconnected" if self.fault else ("connected" if self.serial else "disabled"),
-                    "busy": self.owner is not None, "command": self.command,
+                    "busy": self.owner is not None, "command": self.command, "speed": self.speed,
                     "reason": self.reason, "fault": self.fault,
+                    "calibration": dict(self.calibration),
                     "camera_live": age is not None and age <= FRAME_MAX_AGE,
                     "camera_error": error, "frame": number}
 
@@ -209,11 +281,13 @@ class Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             controller = self.server.controller
             if path == "/api/claim":
-                return self.reply(200, {"token": controller.claim()})
+                return self.reply(200, {"token": controller.claim(body.get("speed", "slow"))})
             if path == "/api/control":
                 controller.control(body.get("token"), body.get("sequence"), body.get("command"), body.get("frame_time"))
             elif path == "/api/stop":
                 controller.stop_all()
+            elif path == "/api/calibration":
+                controller.set_calibration(body)
             else:
                 return self.reply(404, {"error": "Not found"})
             self.reply(200, controller.status())
@@ -231,7 +305,7 @@ def connect_arduino(path):
         port.write(b"x?")  # STOP and identify; never probe with a movement command.
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if port.readline().strip() == b"NB3-DEMO-3 SERVO WATCHDOG=600 SPEED=12 LEFT=9 RIGHT=10":
+            if port.readline().strip() == FIRMWARE_ID:
                 return port
         raise RuntimeError("Demo firmware not detected. Upload arduino/robot_demo first, or run without --serial for preview.")
     except Exception:
@@ -265,10 +339,12 @@ def main():
     parser.add_argument("--serial", help="Arduino device, e.g. /dev/ttyUSB0. Omit to disable all motor output.")
     parser.add_argument("--flip", choices=["none", "vertical", "horizontal", "both"], default="none")
     parser.add_argument("--no-camera", action="store_true", help="Test the disconnected camera interface")
+    parser.add_argument("--calibration-file", type=Path,
+                        default=ROOT.parents[3] / "_tmp/robot-control/slow-calibration.json")
     args = parser.parse_args()
     frames = Frames()
     port = connect_arduino(args.serial) if args.serial else None
-    controller = Controller(frames, port)
+    controller = Controller(frames, port, calibration_path=args.calibration_file)
     camera = None
     server = None
     finished = threading.Event()

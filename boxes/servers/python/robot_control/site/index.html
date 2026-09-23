@@ -30,6 +30,28 @@
         <h2>A little push.<br>A new perspective.</h2>
         <p class="intro">Hold ↑ + → to curve right.<br>Release all directions to stop.</p>
         <div id="mode" class="mode">Checking robot…</div>
+        <label class="speed-label" for="speed">Test speed</label>
+        <select id="speed" aria-describedby="speed-help" disabled>
+          <option value="slow">Slow · normal driving</option>
+          <option value="full">Full speed · 2-second test</option>
+        </select>
+        <p id="speed-help" class="speed-help">For full speed, lift both wheels off the ground. Select a speed before taking control, then briefly hold forward or backward.</p>
+        <details class="calibration">
+          <summary>Adjust slow wheel speeds</summary>
+          <p class="speed-help">Lower numbers reduce the command strength. Adjust the faster wheel by one step, then compare again. Test one direction at a time with wheels raised.</p>
+          <fieldset id="calibration-fields" disabled>
+            <legend>Slow-speed settings (6–24)</legend>
+            <div class="calibration-grid">
+              <label>Left forward<input id="left_forward" type="number" min="6" max="24" step="1" value="12"></label>
+              <label>Right forward<input id="right_forward" type="number" min="6" max="24" step="1" value="12"></label>
+              <label>Left reverse<input id="left_backward" type="number" min="6" max="24" step="1" value="12"></label>
+              <label>Right reverse<input id="right_backward" type="number" min="6" max="24" step="1" value="12"></label>
+            </div>
+            <button id="apply-calibration" class="text-button" type="button">Save wheel settings</button>
+            <button id="reset-calibration" class="text-button" type="button">Reset all to 12</button>
+          </fieldset>
+          <p id="calibration-notice" class="speed-help" role="status">Press Stop before editing. Saved settings apply to slow mode only.</p>
+        </details>
         <button id="claim" class="claim" disabled>Take control</button>
         <div class="dpad" aria-label="Direction pad">
           <button data-direction="forward" class="direction forward" aria-label="Move forward" disabled><span aria-hidden="true">↑</span><small>FORWARD</small></button>

@@ -5,6 +5,8 @@ let token = null, sequence = 0, desired = "stop", online = false, claiming = fal
 let state = null, lastVideo = 0, frameTime = 0, frameNumber = 0, objectURL = null;
 const steering = new SteeringInput();
 let controlBusy = false;
+const calibrationKeys = ["left_forward", "right_forward", "left_backward", "right_backward"];
+let calibrationDirty = false, calibrationSaving = false;
 const fresh = () => performance.now() - lastVideo < 1000 && lastVideo > 0;
 
 async function api(path, body, keepalive = false) {
@@ -24,15 +26,20 @@ function render() {
   $("video-message").hidden = fresh();
   $("video-message").textContent = online ? (state?.camera_error || "Waiting for fresh video…") : "Connection lost. Movement has stopped.";
   $("camera").parentElement.classList.toggle("stale", !fresh());
-  $("claim").disabled = !online || claiming || Boolean(state?.fault) || (!token && (state?.busy || !fresh()));
+  $("claim").disabled = !online || claiming || calibrationSaving || calibrationDirty || Boolean(state?.fault) || (!token && (state?.busy || !fresh()));
   $("claim").textContent = token ? "Release control" : (state?.busy ? "Another driver has control" : "Take control");
   $("claim").classList.toggle("owned", Boolean(token));
+  $("speed").disabled = !online || claiming || Boolean(token) || Boolean(state?.busy);
+  $("calibration-fields").disabled = !online || claiming || calibrationSaving || Boolean(token) || Boolean(state?.busy);
+  if (state?.calibration && !calibrationDirty && !calibrationSaving) {
+    for (const key of calibrationKeys) $(key).value = state.calibration[key];
+  }
   for (const button of directions) {
     button.disabled = !online || !token || !fresh();
     button.classList.toggle("active", desired.split("_").includes(button.dataset.direction));
   }
   if (state) {
-    $("mode").textContent = state.mode === "preview" ? "Preview mode · motor output disabled" : (state.fault ? "Arduino disconnected" : "Arduino connected · gentle speed");
+    $("mode").textContent = state.mode === "preview" ? "Preview mode · motor output disabled" : (state.fault ? "Arduino disconnected" : (state.speed === "full" ? "Arduino connected · FULL SPEED · 2-second limit" : "Arduino connected · slow speed"));
     $("command").textContent = online ? state.command.replaceAll("_", " ") : "Unknown";
   }
 }
@@ -40,6 +47,7 @@ function render() {
 function clearInput() {
   desired = "stop";
   steering.clear();
+  $("speed").value = "slow";
   render();
 }
 
@@ -92,13 +100,41 @@ $("claim").addEventListener("click", async () => {
   claiming = true;
   render();
   try {
-    const result = await api("/api/claim", {});
+    const speed = $("speed").value;
+    const result = await api("/api/claim", {speed});
     token = result.token;
     sequence = 0;
-    $("notice").textContent = "You have control. Hold ↑ + → to curve right.";
+    $("notice").textContent = speed === "full" ? "Full-speed test ready. Keep wheels raised; briefly hold forward or backward." : "You have control. Hold ↑ + → to curve right.";
     sendControl(true);
   } catch (error) {$("notice").textContent = error.message;}
   finally {claiming = false; render();}
+});
+
+for (const key of calibrationKeys) $(key).addEventListener("input", () => {
+  calibrationDirty = true;
+  $("calibration-notice").textContent = "Save your changes before taking control.";
+  render();
+});
+$("reset-calibration").addEventListener("click", () => {
+  for (const key of calibrationKeys) $(key).value = 12;
+  calibrationDirty = true;
+  $("calibration-notice").textContent = "Defaults selected. Save to apply them.";
+  render();
+});
+$("apply-calibration").addEventListener("click", async () => {
+  const values = Object.fromEntries(calibrationKeys.map(key => [key, Number($(key).value)]));
+  if (Object.values(values).some(value => !Number.isInteger(value) || value < 6 || value > 24)) {
+    $("calibration-notice").textContent = "Use whole numbers from 6 to 24.";
+    return;
+  }
+  calibrationSaving = true;
+  render();
+  try {
+    state = await api("/api/calibration", values);
+    calibrationDirty = false;
+    $("calibration-notice").textContent = "Saved on the robot. Select slow speed and take control to test.";
+  } catch (error) {$("calibration-notice").textContent = error.message;}
+  finally {calibrationSaving = false; render();}
 });
 
 for (const button of directions) {
@@ -125,6 +161,7 @@ window.addEventListener("keydown", event => {
     return;
   }
   if (!SteeringInput.keys[key] || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (["SELECT", "INPUT", "TEXTAREA"].includes(event.target?.tagName)) return;
   event.preventDefault();
   if (event.repeat || !online || !token || !fresh()) return;
   steering.keys.add(key);
