@@ -137,6 +137,26 @@ h1 {
 .viewfinder img.flipped {
   transform:scaleY(-1);
 }
+#detections {
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  pointer-events:none;
+}
+.detection-panel {border-top:1px solid var(--line); padding:16px 22px;}
+.detection-heading {display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px; font-size:12px;}
+.detection-heading label {display:flex; align-items:center; gap:7px;}
+.detection-heading input {accent-color:var(--lime);}
+#detection-summary {font-size:13px; line-height:1.5; margin:12px 0 6px;}
+.detection-help {font-size:11px; color:var(--muted); line-height:1.5; margin:0;}
+.speech-controls {display:flex; flex-wrap:wrap; gap:12px; margin:16px 0 10px;}
+.speech-controls button {border:1px solid var(--line); border-radius:8px; padding:10px 12px;}
+.speech-controls button:disabled {opacity:.45; cursor:default;}
+#spoken-description {font-size:14px; line-height:1.5; margin:10px 0 0;}
+.llm-option {display:flex; align-items:center; gap:7px; font-size:12px; margin:0 0 8px;}
+.llm-option input {accent-color:var(--lime);}
+#description-source {margin:8px 0;}
 .viewfinder.stale img {
   opacity:.25;
 }

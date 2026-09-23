@@ -2,6 +2,9 @@
 
 ***Important***: This driver installation only applies to *Revision 2* NB3_Mouth boards.
 
+For the current Debian 13 Raspberry Pi setup, see the
+[tested build and installation procedure](Setup-Pi.md).
+
 ### Change OS Configuration 
 
 The Raspberry Pi does not enable i2s by default. You can enable it by opening the file called "config.txt" in the /"boot" folder of your Raspberry Pi and changing a single line.

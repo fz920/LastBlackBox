@@ -4,6 +4,9 @@ const directions = [...document.querySelectorAll("[data-direction]")];
 let token = null, sequence = 0, desired = "stop", online = false, claiming = false;
 let state = null, lastVideo = 0, frameTime = 0, frameNumber = 0, objectURL = null;
 const steering = new SteeringInput();
+const detectionOverlay = new DetectionOverlay($("detections"), $("detection-status"), $("detection-summary"));
+const speechControls = new SpeechControls($, api);
+let videoRequestMode = null;
 let controlBusy = false;
 const calibrationKeys = ["left_forward", "right_forward", "left_backward", "right_backward"];
 let calibrationDirty = false, calibrationSaving = false;
@@ -19,6 +22,8 @@ async function api(path, body, keepalive = false) {
 }
 
 function render() {
+  speechControls.render(state?.speech, online);
+  detectionOverlay.render($("show-detections").checked, fresh(), $("camera").classList.contains("flipped"));
   $("connection").textContent = online ? "Robot connected" : "Disconnected";
   $("connection").className = `badge ${online ? "good" : "bad"}`;
   $("live").textContent = fresh() ? "Live" : "Video paused";
@@ -175,6 +180,12 @@ $("stop").addEventListener("click", () => emergencyStop());
 $("flip").addEventListener("click", () => {
   const flipped = $("camera").classList.toggle("flipped");
   $("flip").textContent = flipped ? "Reset orientation" : "Flip vertically";
+  render();
+});
+$("show-detections").addEventListener("change", () => {
+  videoRequestMode = null;
+  detectionOverlay.update("starting", null);
+  render();
 });
 window.addEventListener("blur", () => {if (token) emergencyStop("Window lost focus. Take control to continue.");});
 document.addEventListener("visibilitychange", () => {if (document.hidden && token) emergencyStop("Control released while away.");});
@@ -202,16 +213,24 @@ async function videoLoop() {
   let nextURL = null;
   try {
     if (!document.hidden) {
-      const response = await fetch("/api/frame", {cache: "no-store", signal: AbortSignal.timeout(1500)});
+      const showDetections = $("show-detections").checked;
+      const response = await fetch(showDetections ? "/api/frame?detect=1" : "/api/frame", {cache: "no-store", signal: AbortSignal.timeout(1500)});
       if (!response.ok) throw new Error("No video");
       const number = Number(response.headers.get("X-Frame-Number"));
-      if (number !== frameNumber) {
+      if (number !== frameNumber || videoRequestMode !== showDetections) {
+        const detectionState = response.headers.get("X-Detection-State");
+        const detections = JSON.parse(response.headers.get("X-Detections") || "null");
         const blob = await response.blob();
         nextURL = URL.createObjectURL(blob);
         // Decode before replacing the displayed image to avoid flicker.
         const decoded = new Image();
         decoded.src = nextURL;
         await decoded.decode();
+        if (showDetections !== $("show-detections").checked) {
+          URL.revokeObjectURL(nextURL);
+          nextURL = null;
+          throw new Error("Video mode changed; request the new view");
+        }
         $("camera").src = nextURL;
         $("camera").hidden = false;
         if (objectURL) URL.revokeObjectURL(objectURL);
@@ -220,11 +239,16 @@ async function videoLoop() {
         frameNumber = number;
         frameTime = Number(response.headers.get("X-Frame-Time"));
         lastVideo = performance.now();
+        videoRequestMode = showDetections;
+        detectionOverlay.update(detectionState, detections);
       } else {
         await response.body.cancel();
       }
     }
-  } catch (_) {if (nextURL) URL.revokeObjectURL(nextURL);}
+  } catch (_) {
+    if (nextURL) URL.revokeObjectURL(nextURL);
+    detectionOverlay.update("unavailable", null);
+  }
   render();
   setTimeout(videoLoop, 80);
 }

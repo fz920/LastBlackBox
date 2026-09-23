@@ -16,6 +16,172 @@ Open **http://192.168.1.203:8000** on a phone or laptop on the same Wi-Fi.
 That was this Pi's address during setup; use `hostname -I` if it changes.
 On the Pi itself, use http://localhost:8000.
 
+## Show what the Coral detects
+
+Complete the [Coral setup](../../../intelligence/NPU/coral/Setup-Trixie.md), then
+run this once from the repository root (internet required for downloads):
+
+```bash
+bash boxes/servers/python/robot_control/setup-detection.sh
+```
+
+Start the website with detection enabled:
+
+```bash
+python3 boxes/servers/python/robot_control/server.py --detect
+# Include the existing Arduino controls:
+python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect
+```
+
+Run only one server at a time. Refresh the website and leave **Show detections**
+checked. Green boxes show object names and confidence scores, with a count below
+the camera. Try a person, cup, bottle, or chair in good light. **Coral live**
+confirms inference is running even if no objects exceed the 50% threshold.
+Uncheck the box for the faster raw camera preview. **Flip vertically** flips the
+display and boxes together; it does not change the image sent to the model.
+
+This uses Google's Edge TPU SSD MobileNet V2 model trained on COCO's 80 common
+object categories. It does not recognise arbitrary objects, identities, or
+distances. Labels can be wrong and missing boxes do not mean the path is clear.
+With `--detect` alone, this step only displays detections. Add spoken descriptions
+as described below; detection never initiates robot movement.
+
+Detection runs at up to five analysed frames per second. Each JPEG is delivered
+with its own boxes so moving objects stay aligned. The camera still captures
+at 15 fps; the raw website preview polls at up to about 12 fps. The displayed
+inference time excludes JPEG decoding, camera capture, and network delivery.
+Only the latest result is retained in memory; no camera images are saved or sent
+to a cloud service. If detection fails, the website shows raw video without old
+boxes and the worker retries. Existing camera and motor watchdogs still apply.
+
+The system Python owns the camera. A separate worker uses
+`_tmp/coral/detection-venv` (Python 3.9.25, Google's `tflite-runtime==2.5.0.post1`,
+NumPy 1.26.4, Pillow 11.3.0). This older, isolated runtime is needed on this Pi:
+the earlier Python 3.11 / TFLite 2.14 environment passed classification but
+segfaulted when loading this detector. The setup script checks the downloaded
+wheel/model/labels against SHA-256 hashes. Models and environments stay under
+ignored `_tmp/coral/`; the script and application code are versioned.
+
+For diagnosis, open `/api/detections` for current status. CLI overrides are
+`--detector-python`, `--detection-model`, and `--detection-labels`; the worker
+expects the same SSD output layout, not arbitrary models.
+
+To run it in the background for the current Pi session:
+
+```bash
+systemctl --user stop nb3-robot-control
+systemd-run --user --unit=nb3-robot-control --collect \
+  --property=WorkingDirectory="$PWD" -- \
+  /usr/bin/python3 -B "$PWD/boxes/servers/python/robot_control/server.py" \
+  --serial /dev/ttyUSB0 --detect
+```
+
+This transient service does not automatically start after a reboot.
+
+## Spoken descriptions through the robot's mouth
+
+Install the [NB3 mouth/ears driver](../../../audio/i2s/driver/Setup-Pi.md) and
+prepare the offline speech engine once:
+
+```bash
+bash boxes/servers/python/robot_control/setup-speech.sh
+```
+
+This downloads Debian's `espeak-ng`, `libespeak-ng1`, `espeak-ng-data`,
+`libpcaudio0`, and `libsonic0` into ignored `_tmp/speech/`, without changing
+system packages. eSpeak NG 1.52.0 was tested on this Pi. This follows the
+[repo's speech generation example](../../../audio/signal-processing/python/generation/README.md).
+
+Stop the old website and start with both `--detect` and `--speech`:
+
+```bash
+systemctl --user stop nb3-robot-control
+systemd-run --user --unit=nb3-robot-control --collect \
+  --property=WorkingDirectory="$PWD" -- \
+  /usr/bin/python3 -B "$PWD/boxes/servers/python/robot_control/server.py" \
+  --serial /dev/ttyUSB0 --detect --speech
+```
+
+Refresh the website. **Describe what I see** speaks the current detected object
+names and counts, for example, “I think I can see a person and 2 cups.” The
+description also appears below the camera. **Stop speaking** interrupts playback.
+Speech comes from the robot's mouth, not the phone/laptop browser. No driver
+claim or motor command is needed; there is no automatic narration or movement.
+
+Descriptions use fresh results above 50% confidence, mentioning at most three
+object categories. They do not infer activities, identities, distance, or a safe
+route. With no qualifying objects, the robot says it is unsure what it is looking
+at. If the detector is stale or disconnected, the request is rejected. Only one
+utterance is allowed at a time; repeated clicks do not build a queue.
+
+The service uses offline eSpeak NG (British English, 155 words/minute, amplitude
+65) and ALSA `aplay`, with bounded subprocess timeouts and a cancellable background
+thread. Basic mode needs no LLM. Neither mode needs an API key, cloud connection,
+microphone recording, or saved audio files. Voice generation and playback are independent of camera,
+NPU, and motor watchdogs. The transcript is retained in memory until replaced or
+the server restarts.
+
+The default output is the ALSA card named `MAX98357A`/NB3, discovered by name.
+There is no fallback to HDMI or headphones if the mouth is missing. Use
+`--speech-device plughw:CARD=MAX98357A,DEV=0` to select it explicitly, or
+`--speech-engine /usr/bin/espeak-ng` if using a system installation.
+Missing engine/device and playback failures appear in the website's speech status.
+
+On this Pi the repo's unmodified driver built for `6.18.50+rpt-rpi-v8`, registered
+both playback and capture, and bound as `nb3_audio`. A live description completed
+through ALSA without errors while camera and detection stayed live and motors
+remained stopped. The user confirmed hearing it clearly from the mouth.
+Chromium checks passed for describe/stop, transcript, and desktop/mobile layouts.
+
+## Local LLM descriptions
+
+The website can use the installed [Qwen model](../../../intelligence/LLMs/local-NB3/README.md)
+to phrase its spoken descriptions. Start the server with:
+
+```bash
+python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect --speech --llm
+```
+
+For the background service, append `--llm` to the `systemd-run` command above.
+Refresh the page, leave **Use local LLM** checked, and press **Describe what I see**.
+The website shows loading/thinking progress, the resulting text, and whether it
+came from the LLM or a basic fallback. **Cancel description** stops model loading
+or generation; the same button becomes **Stop speaking** during audio playback.
+Uncheck **Use local LLM** for the faster basic description.
+
+This reuses the existing model and runtime: no additional model downloads or
+copies. The model process starts only for a description, uses two CPU threads,
+and exits before audio playback, releasing its memory. Requests are private to
+the website process through a temporary Unix socket; there is no extra network
+listener. Loading is limited to 45 seconds and generation to 30 seconds. A
+two-category test took 13.3 seconds, and a live website/browser test took 27.2
+seconds on this Pi. First use or a busy Pi may take longer.
+
+Because unrestricted Qwen answers failed the earlier factuality checks, this
+integration limits what it can generate. Application code forms the correct
+count/name phrases for up to three detected categories. The LLM chooses their
+ordering and introductory wording under a grammar that preserves all those
+phrases. A separate validator rejects output outside the permitted sentences,
+including truncation, incorrect counts, or invented attributes. This provides
+limited wording variation, not unrestricted scene understanding. It cannot add
+activities, colours, identities, or distances, and never commands movement.
+The detector itself can still misidentify or miss objects.
+
+If the model is unavailable, times out, or produces invalid output, the existing
+basic description is used and the website explains the fallback. Empty detections
+skip the model. After generation the current detections are checked again: if
+the selected object counts changed, a fresh basic description replaces the old
+answer; if detection is stale, nothing is spoken. Stop/cancel prevents later
+playback, including when pressed during loading.
+
+Tests in `test_llm.py` cover the permitted vocabulary, exact counts, rejecting
+invented/truncated answers, process cleanup, cancellation, timeouts, opt-out,
+empty scenes, and scene changes. All 51 Python tests passed. Live Chromium checks
+passed for LLM description/playback, cancel, opt-out, and desktop/mobile layouts,
+with the camera live and no motor commands sent.
+
+## Preview controls
+
 The default is **preview mode**: live camera and simulated direction commands,
 with no serial port opened and no motor output. Press **Take control** to try
 the buttons. Releasing all directions stops it. **Stop** also releases driver control.
@@ -218,6 +384,22 @@ when `g++` is available, checking all curved wheel outputs and their stop timeou
 Run the input-combination tests with `node test_steering.js` and the speed-selector
 handler tests with `node test_speed_ui.js` on a machine with
 Node.js (Node is not required to run the website).
+
+Speech adds `python3 -B -m unittest -v test_speech` and
+`node test_speech_ui.js`. Tests cover counts/plurals, empty scenes, stale/failed
+detection rejection, device selection, no speech queue, subprocess cancellation,
+playback errors, protected HTTP routes, and no motor requests. The combined
+suite passes 42 Python tests and all four JavaScript suites.
+
+Detection adds `node test_detection_ui.js` for box geometry, vertical flipping,
+labels/counts, and unavailable/stale states. The Python detection tests cover
+model-output decoding, worker pipes and shutdown, stale results, and exact
+JPEG/metadata pairing with raw-video fallback. All 34 Python tests and the three
+JavaScript suites passed on the Pi. Hardware checks detected a person and tie
+in Coral's Grace Hopper test image (about 15 ms warm inference), then processed
+the live camera. Chromium checks covered desktop/mobile layout, toggling, and
+orientation. Terminating the worker confirmed raw video continued without old
+boxes and detection recovered automatically; the robot stayed stopped.
 
 The speed/calibration update passed all 27 Python tests, 42 JavaScript steering
 assertions, and the actual browser-handler checks in `test_speed_ui.js`. The

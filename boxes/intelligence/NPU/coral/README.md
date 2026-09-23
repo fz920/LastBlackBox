@@ -1,5 +1,9 @@
 # Intelligence : NPU : Coral
-A neural processing unit based on Goggle EdgeTPU.
+A neural processing unit based on Google EdgeTPU.
+
+**Debian 13 / Python 3.13:** follow [the tested setup guide](Setup-Trixie.md).
+It adapts the instructions below for modern APT key handling and uses an isolated
+Python 3.11 environment for the tutorial's TensorFlow Lite runtime.
 
 ## Setup your NPU
 Your neural processing unit is made by Google (and distributed by Coral). It contains an EdgeTPU (tensor processing unit) that very efficiently implements the computations used in (feed forward) neural networks. It connects to your RPi via USB3, allowing you to send "input" data and retrieve "outputs" of the neural network inference very quickly. However, in order to communicate with your EdgeTPU, you will need to install some additional libraries.
@@ -90,4 +94,3 @@ python3 classify_image.py \
 --labels models/inat_bird_labels.txt \
 --input images/parrot.jpg
 ```
-

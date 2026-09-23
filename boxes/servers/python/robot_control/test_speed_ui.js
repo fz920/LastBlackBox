@@ -7,13 +7,14 @@ const vm = require("node:vm");
 class Element {
   constructor() {
     this.listeners = {};
-    this.classList = {toggle() { return false; }};
+    this.classList = {toggle() { return false; }, contains() { return false; }, add() {}};
     this.parentElement = {classList: this.classList};
     this.dataset = {};
     this.value = "slow";
   }
   addEventListener(name, handler) { this.listeners[name] = handler; }
   setPointerCapture() {}
+  getContext() { return {clearRect() {}, strokeRect() {}, fillRect() {}, fillText() {}, measureText() { return {width: 20}; }}; }
 }
 
 async function main() {
@@ -36,7 +37,7 @@ async function main() {
     window, performance: {now: () => 1000}, AbortSignal,
     setTimeout() {}, setInterval() {},
     fetch: async (path, options) => {
-      if (path === "/api/frame") return {ok: false};
+      if (path.startsWith("/api/frame")) return {ok: false};
       const body = options.body === undefined ? undefined : JSON.parse(options.body);
       requests.push({path, body});
       let reply;
@@ -52,7 +53,7 @@ async function main() {
       return {ok: true, json: async () => reply};
     },
   });
-  for (const filename of ["steering.js", "app.js"])
+  for (const filename of ["steering.js", "detection.js", "speech.js", "app.js"])
     vm.runInContext(fs.readFileSync(`${__dirname}/site/${filename}`, "utf8"), context);
   const settle = () => new Promise(resolve => setImmediate(resolve));
   await settle();

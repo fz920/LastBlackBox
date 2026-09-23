@@ -10,7 +10,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 ROOT = Path(__file__).resolve().parent
 # The legacy letter protocol uses the opposite direction convention on this
@@ -250,15 +250,32 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == "/api/status":
-            return self.reply(200, self.server.controller.status())
+            speech = getattr(self.server, "speech", None)
+            return self.reply(200, {**self.server.controller.status(),
+                "speech": speech.status() if speech else {"enabled": False}})
+        if path == "/api/detections":
+            detector = getattr(self.server, "detector", None)
+            status = detector.snapshot()[1] if detector else {"enabled": False, "live": False, "objects": [], "error": "Detection is not enabled"}
+            return self.reply(200, status)
         if path == "/api/frame":
             data, timestamp, number, error = self.server.controller.frames.latest()
+            detection_headers = {"X-Detection-State": "off"}
+            if parse_qs(urlsplit(self.path).query).get("detect") == ["1"]:
+                detector = getattr(self.server, "detector", None)
+                result, status = detector.snapshot() if detector else (None, {"enabled": False})
+                detection_headers["X-Detection-State"] = "unavailable" if status['enabled'] else "disabled"
+                if result:
+                    data, timestamp, number = result['jpeg'], result['frame_time'], result['frame']
+                    detection_headers = {"X-Detection-State": "live", "X-Detections": json.dumps(
+                        {key: result[key] for key in ('objects', 'inference_ms', 'width', 'height')}, separators=(',', ':'))}
             if data is None or time.monotonic() - timestamp > FRAME_MAX_AGE:
                 return self.reply(503, {"error": error or "Camera paused"})
-            return self.reply(200, data, "image/jpeg", {"X-Frame-Time": timestamp, "X-Frame-Number": number})
+            return self.reply(200, data, "image/jpeg", {"X-Frame-Time": timestamp, "X-Frame-Number": number, **detection_headers})
         files = {"/": ("index.html", "text/html; charset=utf-8"),
                  "/style.css": ("style.css", "text/css"),
                  "/steering.js": ("steering.js", "text/javascript"),
+                 "/detection.js": ("detection.js", "text/javascript"),
+                 "/speech.js": ("speech.js", "text/javascript"),
                  "/app.js": ("app.js", "text/javascript")}
         if path not in files:
             return self.reply(404, {"error": "Not found"})
@@ -280,6 +297,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Expected a JSON object")
             path = urlsplit(self.path).path
             controller = self.server.controller
+            if path in ("/api/speech/describe", "/api/speech/stop"):
+                speech = getattr(self.server, "speech", None)
+                if not speech:
+                    raise ValueError("Speech is not enabled on this server")
+                return self.reply(200, speech.describe(body.get('use_llm', False)) if path.endswith('/describe') else speech.stop())
             if path == "/api/claim":
                 return self.reply(200, {"token": controller.claim(body.get("speed", "slow"))})
             if path == "/api/control":
@@ -341,12 +363,26 @@ def main():
     parser.add_argument("--no-camera", action="store_true", help="Test the disconnected camera interface")
     parser.add_argument("--calibration-file", type=Path,
                         default=ROOT.parents[3] / "_tmp/robot-control/slow-calibration.json")
+    parser.add_argument("--detect", action="store_true", help="Enable Coral object detection")
+    parser.add_argument("--detector-python", type=Path, default=ROOT.parents[3] / "_tmp/coral/detection-venv/bin/python")
+    parser.add_argument("--detection-model", type=Path, default=ROOT.parents[3] / "_tmp/coral/models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite")
+    parser.add_argument("--detection-labels", type=Path, default=ROOT.parents[3] / "_tmp/coral/models/coco_labels.txt")
+    parser.add_argument("--speech", action="store_true", help="Enable spoken descriptions through the NB3 mouth")
+    parser.add_argument("--llm", action="store_true", help="Enable on-demand local LLM descriptions (requires --speech)")
+    parser.add_argument("--speech-engine", type=Path, default=ROOT.parents[3] / "_tmp/speech/bin/espeak-ng")
+    parser.add_argument("--speech-device", default="auto", help="ALSA output device; auto selects the NB3/MAX98357A mouth")
     args = parser.parse_args()
+    if args.speech and not args.detect:
+        parser.error("--speech requires --detect")
+    if args.llm and not args.speech:
+        parser.error("--llm requires --speech")
     frames = Frames()
     port = connect_arduino(args.serial) if args.serial else None
     controller = Controller(frames, port, calibration_path=args.calibration_file)
     camera = None
     server = None
+    detector = None
+    speech = None
     finished = threading.Event()
     try:
         if not args.no_camera:
@@ -360,6 +396,19 @@ def main():
         server = ThreadingHTTPServer((args.host, args.port), Handler)
         server.daemon_threads = True
         server.controller = controller
+        if args.detect:
+            from detection import Detection
+            detector = Detection(frames, args.detector_python, args.detection_model, args.detection_labels, FRAME_MAX_AGE)
+            detector.start()
+        server.detector = detector
+        if args.speech:
+            from speech import Speech
+            llm = None
+            if args.llm:
+                from llm import LocalLLM
+                llm = LocalLLM(ROOT.parents[3] / '_tmp/llm')
+            speech = Speech(detector, args.speech_engine, args.speech_device, llm=llm)
+        server.speech = speech
 
         def watchdog():
             while not finished.wait(0.05):
@@ -380,6 +429,10 @@ def main():
     finally:
         finished.set()
         controller.stop_all()
+        if speech:
+            speech.close()
+        if detector:
+            detector.close()
         if server:
             server.server_close()
         if camera:

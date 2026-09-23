@@ -6,6 +6,8 @@
   <title>NB3 · Robot control</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/steering.js" defer></script>
+  <script src="/detection.js" defer></script>
+  <script src="/speech.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -19,11 +21,26 @@
         <div class="panel-heading"><h2>Through the robot’s eyes</h2><span id="live" class="badge">Waiting for video</span></div>
         <div class="viewfinder">
           <img id="camera" alt="Live view from the robot camera" hidden>
+          <canvas id="detections" width="640" height="480" aria-hidden="true"></canvas>
           <div class="crosshair" aria-hidden="true"></div>
           <div id="video-message" role="status">Connecting to the camera…</div>
           <span class="camera-label">NB3 / FRONT CAMERA</span>
         </div>
         <div class="camera-footer"><span>640 × 480 <span class="muted">/ Live preview</span></span><button id="flip" class="text-button">Flip vertically</button></div>
+        <div class="detection-panel">
+          <div class="detection-heading"><label><input id="show-detections" type="checkbox" checked> Show detections</label><span id="detection-status" class="badge">Starting detection…</span></div>
+          <p id="detection-summary">Waiting for object detection.</p>
+          <p class="detection-help">Recognises common objects. Boxes show predictions, which may be incorrect or miss objects.</p>
+          <div class="speech-controls" role="group" aria-label="Spoken descriptions">
+            <button id="describe" class="text-button" type="button" disabled>Describe what I see</button>
+            <button id="stop-speaking" class="text-button" type="button" disabled>Stop speaking</button>
+          </div>
+          <label class="llm-option"><input id="use-llm" type="checkbox" checked disabled> Use local LLM</label>
+          <p class="detection-help">LLM wording uses detected names and counts. Loading may take 20–30 seconds. Uncheck for a faster basic description.</p>
+          <p id="description-source" class="detection-help"></p>
+          <p id="speech-status" class="detection-help" role="status">Connecting to speech…</p>
+          <p id="spoken-description"></p>
+        </div>
       </section>
       <section class="controls-panel" aria-label="Driving controls">
         <p class="eyebrow">YOU’RE IN THE DRIVER’S SEAT</p>
