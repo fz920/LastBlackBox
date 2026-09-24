@@ -24,8 +24,7 @@ COMMANDS = {
 WATCHDOG = 0.5
 LEASE = 2.0
 FRAME_MAX_AGE = 1.2
-FULL_SPEED_LIMIT = 2.0
-FIRMWARE_ID = b"NB3-DEMO-5 SERVO WATCHDOG=600 SPEED=12 FULL=90 LIMIT=2000 TRIM=24 LEFT=9 RIGHT=10"
+FIRMWARE_ID = b"NB3-DEMO-6 SERVO WATCHDOG=600 SPEED=12 FULL=90 LIMIT=NONE TRIM=24 LEFT=9 RIGHT=10"
 DEFAULT_CALIBRATION = {"left_forward": 12, "right_forward": 12,
                        "left_backward": 12, "right_backward": 12}
 # Physical wheel directions; curves use half the calibrated inner-wheel offset.
@@ -80,6 +79,13 @@ class Controller:
     CENTER_TURN_SECONDS = 0.12
     CENTER_MAX_TURNS = 6
     SEARCH_MAX_SECONDS = 90
+    SEARCH_STEP_SECONDS = 0.4
+    SEARCH_RETREAT_SECONDS = 0.3
+    SEARCH_MAX_STEPS = 4
+    SEARCH_RETREAT_WINDOW = 10
+    SEARCH_TURN_CAP = 24
+    SEARCH_STEP_CAP = 12
+    SEARCH_PLAN_CAP = 3
 
     def __init__(self, frames, serial_port=None, clock=time.monotonic, calibration_path=None):
         self.frames = frames
@@ -91,6 +97,12 @@ class Controller:
         self.stop_generation = 0
         self.turn_deadline = self.search_deadline = None
         self.search_turns = self.center_turns = 0
+        self.search_steps = 0
+        self.search_turn_limit = self.SEARCH_MAX_TURNS
+        self.search_step_limit = self.SEARCH_MAX_STEPS
+        self.search_explore = False
+        self.search_speed = 'slow'
+        self.retreat_until = 0
         self.sequence = -1
         self.last_contact = 0.0
         self.last_move = 0.0
@@ -98,7 +110,6 @@ class Controller:
         self.reason = "Ready"
         self.fault = ""
         self.speed = "slow"
-        self.full_started = None
         self.calibration_path = Path(calibration_path) if calibration_path else None
         self.calibration = dict(DEFAULT_CALIBRATION)
         if self.calibration_path and self.calibration_path.exists():
@@ -120,14 +131,10 @@ class Controller:
                 self.owner_kind = None
                 self.command = "stop"
                 self.speed = "slow"
-                self.full_started = None
                 self.reason = "Serial connection lost; Arduino timeout stops motors"
                 raise ValueError(self.fault) from exc
         if command == "stop":
-            self.full_started = None
             self.turn_deadline = None
-        elif self.speed == "full" and self.full_started is None:
-            self.full_started = self.clock()
         self.command = command
 
     def _stop(self, reason, release=False):
@@ -141,6 +148,9 @@ class Controller:
             self.owner_kind = None
             self.search_deadline = None
             self.speed = "slow"
+            self.search_explore = False
+            self.search_speed = 'slow'
+            self.retreat_until = 0
 
     def tick(self):
         with self.lock:
@@ -150,9 +160,10 @@ class Controller:
                 self._stop('Search time limit reached', release=True)
             if self.command != "stop":
                 if self.turn_deadline is not None and now >= self.turn_deadline:
+                    completed = self.command
                     self._stop('Search turn completed')
-                elif self.full_started is not None and now - self.full_started >= FULL_SPEED_LIMIT:
-                    self._stop("Full-speed test finished — take control to test again", release=True)
+                    if self.owner_kind == 'search' and completed == 'forward':
+                        self.retreat_until = now + self.SEARCH_RETREAT_WINDOW
                 elif now - self.last_move > WATCHDOG:
                     self._stop("Control timed out — take control again", release=True)
                 elif now - timestamp > FRAME_MAX_AGE:
@@ -160,8 +171,21 @@ class Controller:
             if self.owner and now - self.last_contact > LEASE:
                 self._stop("Driver disconnected", release=True)
 
-    def claim(self, speed="slow", *, kind="manual"):
+    def search_limits(self, max_turns=None, max_steps=None, sequence_length=3):
+        max_turns = self.SEARCH_MAX_TURNS if max_turns is None else max_turns
+        max_steps = self.SEARCH_MAX_STEPS if max_steps is None else max_steps
+        for value, lower, cap, label in ((max_turns, 0, self.SEARCH_TURN_CAP, 'Search turns'),
+                                       (max_steps, 0, self.SEARCH_STEP_CAP, 'Explore steps'),
+                                       (sequence_length, 1, self.SEARCH_PLAN_CAP, 'Moves per image')):
+            if type(value) is not int or not lower <= value <= cap:
+                raise ValueError(f'{label} must be a whole number from {lower} to {cap}.')
+        return max_turns, max_steps, sequence_length
+
+    def claim(self, speed="slow", *, kind="manual", explore=False, max_turns=None, max_steps=None):
         with self.lock:
+            if type(explore) is not bool or (explore and kind != 'search'):
+                raise ValueError('Invalid exploration setting')
+            limits = self.search_limits(max_turns, max_steps)
             self.tick()
             if self.fault:
                 raise ValueError(self.fault)
@@ -174,6 +198,11 @@ class Controller:
             self.owner = secrets.token_urlsafe(24)
             self.owner_kind = kind
             self.search_turns = self.center_turns = 0
+            self.search_steps = 0
+            self.search_turn_limit, self.search_step_limit = limits[:2]
+            self.search_explore = explore
+            self.search_speed = speed if kind == 'search' else 'slow'
+            self.retreat_until = 0
             self.search_deadline = self.clock() + self.SEARCH_MAX_SECONDS if kind == 'search' else None
             self.sequence = -1
             self.last_contact = self.clock()
@@ -221,20 +250,21 @@ class Controller:
             self.last_contact = self.clock()
 
     def search_turn(self, token, direction='right', *, centering=False):
-        """Bounded slow turns: rightward search or shorter left/right adjustments."""
+        """Bounded search turns; precise centring always uses calibrated speed."""
         with self.lock:
             self.search_contact(token)
-            if type(centering) is not bool or direction not in ('left', 'right') or (not centering and direction != 'right'):
+            if type(centering) is not bool or direction not in ('left', 'right'):
                 raise ValueError('Invalid search turn')
             _, timestamp, _, _ = self.frames.latest()
             if self.clock() - timestamp > FRAME_MAX_AGE:
                 self._stop('Camera paused', release=True)
                 raise ValueError('Camera paused. Search stopped.')
             turns = self.center_turns if centering else self.search_turns
-            limit = self.CENTER_MAX_TURNS if centering else self.SEARCH_MAX_TURNS
+            limit = self.CENTER_MAX_TURNS if centering else self.search_turn_limit
             if turns >= limit or self.command != 'stop':
                 raise ValueError('Search turn limit reached or a turn is still active')
-            self.speed = 'slow'
+            self.speed = 'slow' if centering else self.search_speed
+            self.retreat_until = 0
             if centering:
                 self.center_turns += 1
             else:
@@ -245,6 +275,43 @@ class Controller:
             self._send(direction)
             self.reason = ('Centring: ' if centering else 'Looking around: ') + 'short ' + direction + ' turn'
             return duration
+
+    def search_actions(self, token):
+        with self.lock:
+            self.search_contact(token)
+            actions = ['inspect', 'stop']
+            if self.search_turns < self.search_turn_limit:
+                actions += ['left', 'right']
+            if self.search_explore and self.search_steps < self.search_step_limit:
+                actions.append('forward')
+                if self.clock() < self.retreat_until:
+                    actions.append('backward')
+            return actions
+
+    def search_step(self, token, direction):
+        with self.lock:
+            self.search_contact(token)
+            if direction not in ('forward', 'backward') or direction not in self.search_actions(token):
+                raise ValueError('This exploration step is not permitted. Search stopped.')
+            _, timestamp, _, _ = self.frames.latest()
+            if self.clock() - timestamp > FRAME_MAX_AGE or self.command != 'stop':
+                raise ValueError('A step needs fresh video and stopped wheels.')
+            self.retreat_until = 0
+            self.search_steps += 1
+            self.speed = self.search_speed
+            duration = self.SEARCH_STEP_SECONDS if direction == 'forward' else self.SEARCH_RETREAT_SECONDS
+            self.last_move = self.clock()
+            self.turn_deadline = self.clock() + duration
+            self._send(direction)
+            self.reason = 'Exploring: short ' + direction + ' step'
+            return duration
+
+    def pause_search(self, token, reason='Checking live observation'):
+        with self.lock:
+            self.search_contact(token)
+            self._stop(reason)
+            # A partially completed forward pulse cannot authorize a retreat.
+            self.retreat_until = 0
 
     def release_search(self, token, reason='Search finished'):
         with self.lock:
@@ -331,6 +398,15 @@ class Handler(BaseHTTPRequestHandler):
                 if jpeg:
                     return self.reply(200, jpeg, 'image/jpeg')
             return self.reply(404, {'error': 'No confirmed match image'})
+        if path == '/api/search/memory/frame':
+            search = getattr(self.server, 'search', None)
+            check = parse_qs(urlsplit(self.path).query).get('check', [''])[0]
+            if search and check.isascii() and check.isdigit() and len(check) <= 12:
+                with search.lock:
+                    jpeg = search.memory.thumbnail(int(check))
+                if jpeg:
+                    return self.reply(200, jpeg, 'image/jpeg')
+            return self.reply(404, {'error': 'Search memory image no longer available'})
         if path == "/api/detections":
             detector = getattr(self.server, "detector", None)
             status = detector.snapshot()[1] if detector else {"enabled": False, "live": False, "objects": [], "error": "Detection is not enabled"}
@@ -392,14 +468,22 @@ class Handler(BaseHTTPRequestHandler):
                     if body.get('target') is None:
                         raise ValueError('Enter a clue or use Hold to give a clue.')
                     result = search.start(body.get('token'), body.get('target'), body.get('allow_turns'),
-                                          body.get('frame_time'), body.get('stop_generation'))
+                                          body.get('frame_time'), body.get('stop_generation'), explore=body.get('explore', False),
+                                          speed=body.get('speed', 'slow'), max_turns=body.get('max_turns'),
+                                          max_steps=body.get('max_steps'), sequence_length=body.get('sequence_length', 3),
+                                          live=body.get('live', False), image_rate=body.get('image_rate', 2))
                 elif action == 'listen' and hasattr(search, 'finish_recording'):
                     result = search.start(body.get('token'), None, body.get('allow_turns'),
-                                          body.get('frame_time'), body.get('stop_generation'))
+                                          body.get('frame_time'), body.get('stop_generation'), explore=body.get('explore', False),
+                                          speed=body.get('speed', 'slow'), max_turns=body.get('max_turns'),
+                                          max_steps=body.get('max_steps'), sequence_length=body.get('sequence_length', 3),
+                                          live=body.get('live', False), image_rate=body.get('image_rate', 2))
                 elif action == 'finish' and hasattr(search, 'finish_recording'):
                     result = search.finish_recording(body.get('token'))
                 elif action == 'heartbeat':
                     result = search.heartbeat(body.get('token'), body.get('frame_time'))
+                elif action == 'memory/clear':
+                    result = search.clear_memory()
                 elif action == 'cancel':
                     # Global Stop is separate; this route cancels only the caller's search.
                     search._validate_token(body.get('token'))
@@ -452,7 +536,7 @@ def connect_arduino(path):
         while time.monotonic() < deadline:
             if port.readline().strip() == FIRMWARE_ID:
                 return port
-        raise RuntimeError("Demo firmware not detected. Upload arduino/robot_demo first, or run without --serial for preview.")
+        raise RuntimeError("NB3-DEMO-6 firmware required. Stop the website and upload arduino/robot_demo; older firmware still has the two-second cutoff. Run without --serial for preview.")
     except Exception:
         port.close()
         raise

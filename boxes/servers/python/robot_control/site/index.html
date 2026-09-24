@@ -46,7 +46,15 @@
             <p id="search-result" role="status">Choose an object to look for.</p>
             <p id="search-alignment" class="detection-help" role="status"></p>
             <p id="search-request" class="detection-help"></p>
+            <p id="search-plan" class="detection-help" role="status"></p>
             <p id="search-evidence"></p>
+            <details id="search-memory" class="search-memory">
+              <summary id="search-memory-summary">Search memory · no views yet</summary>
+            <p class="detection-help">Recent views from this search, stored in RAM only. Similar views are clues, not a map. A short memory summary helps GPT choose the next view; fresh images still confirm finds.</p>
+              <div id="search-memory-entries" class="search-memory-entries" role="list" aria-label="Inspected views"></div>
+              <button id="search-memory-clear" class="text-button" type="button" disabled>Clear memory</button>
+              <span class="detection-help">Resets on each new search. Stop searching to clear it manually.</span>
+            </details>
             <img id="search-match" alt="Stationary camera image used to confirm the likely match" hidden>
             <p id="search-image-note" class="detection-help" hidden>Matched snapshot · check this image yourself. The live view is beside it.</p>
           </div>
@@ -72,14 +80,27 @@
         </div>
         <div id="search-controls" hidden>
           <p id="search-progress" class="search-progress" role="status">Connecting to search…</p>
+          <p id="search-live-status" class="detection-help" role="status" hidden></p>
           <form id="search-form">
             <label for="search-target">What should I find?</label>
             <input id="search-target" type="text" maxlength="500" placeholder="Find something red I could drink from…" autocomplete="off" aria-describedby="search-help">
+            <div class="search-live-settings">
+              <label for="search-mode">Search mode<select id="search-mode"><option value="snapshot">Snapshot search</option><option value="live">Live search</option></select></label>
+              <label for="search-image-rate">Images per second<select id="search-image-rate" aria-describedby="search-live-help" disabled><option value="0.5">0.5</option><option value="1">1</option><option value="2" selected>2</option><option value="4">4</option></select></label>
+            </div>
+            <p id="search-live-help" class="privacy-note" hidden>Continuous uploads during search, including movement. Higher rates use more API data; assessments may be slower. Changes apply to the next search.</p>
             <label class="search-arm"><input id="search-arm" type="checkbox"> Allow short turns to find and centre</label>
+            <label class="search-arm"><input id="search-explore" type="checkbox"> Explore: allow forward steps and retreat</label>
+            <label class="search-speed-label" for="search-speed">Movement speed <select id="search-speed"><option value="slow">Calibrated speed</option><option value="full">Full speed · short bursts</option></select></label>
+            <div class="search-limits">
+              <label for="search-max-turns">Search turns<input id="search-max-turns" type="number" min="0" max="24" step="1" value="8" required></label>
+              <label for="search-max-steps">Explore steps<input id="search-max-steps" type="number" min="0" max="12" step="1" value="4" required></label>
+              <label for="search-sequence">Moves per image<select id="search-sequence"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option></select></label>
+            </div>
             <div class="speech-controls"><button id="start-search" class="claim" type="submit" disabled>Find from text</button><button id="search-voice" class="text-button" type="button" aria-pressed="false" disabled>Hold to give a clue</button><button id="cancel-search" class="text-button" type="button" disabled>Stop search</button></div>
           </form>
-          <p id="search-help" class="privacy-note">Type a clue or hold the button and speak near the robot, then release to search. It turns to find and centre a match, then speaks. Keep the area clear; no obstacle sensing.</p>
-          <details class="conversation-help"><summary>Search limits and privacy</summary><p>Your typed clue or released recording, search criteria and checked images go to OpenAI (paid API usage). Clues are limited to 500 characters or 15 seconds of recording. The robot stays stopped while interpreting; an unclear clue prompts a question. Finds and clarification questions use an AI-generated voice. Audio and photos stay in memory on the Pi. Search allows at most 8 short search turns, 6 centring turns and 20 image checks within 90 seconds, including recording and interpretation. Search turns last 0.3 seconds; centring turns last 0.12 seconds, at slow speed. A match and a centred view each need two stationary image checks. Uncertain or lost targets stop centring. It does not approach the object; wheel angles and a full-circle sweep are not measured. STOP, leaving the page, lost video or disconnection cancels the search.</p></details>
+          <p id="search-help" class="privacy-note">Type or speak a clue. GPT plans up to your chosen moves per image, then checks a new view. Steps need Explore enabled. Full speed uses short bursts; centring stays calibrated. Supervise Explore on clear, level floor away from edges. No obstacle or distance sensing.</p>
+          <details class="conversation-help"><summary>Search limits and privacy</summary><p>Your typed clue or released recording, search criteria, recent observations/actions and checked images go to OpenAI (paid API usage). Clues are limited to 500 characters or 15 seconds. Snapshot search stays stopped during API calls. Live search sends recent frames to a persistent Realtime session, including during movement, at up to your selected image rate. This may increase API usage. Actual uploads and completed assessments are shown separately. Old images are removed from the session; no video is saved locally. GPT proposes a sequence of up to 3 short movements, then looks again; local code checks the whole sequence and every movement. Snapshot search assesses images between sequences. Live assessments can interrupt a sequence for a possible target, uncertainty or a stop request; only fresh stationary assessments authorize new movements or confirm a find. Choose 0–24 search turns and 0–12 Explore steps (defaults 8 and 4). These are maximum budgets, not guaranteed movement counts. The fixed limits remain 6 centring turns, 20 stationary image checks (plus at most 20 background checks in Live mode) and 90 seconds, including clue interpretation. Limits apply to the next search and cannot change while it is running. Search turns last 0.3 seconds, forward steps 0.40 seconds and backward steps 0.30 seconds at your selected speed. Full speed bypasses wheel trim and can travel farther in each burst; test wheel directions with wheels raised first. Centring always uses calibrated speed with 0.12-second turns. Speed resets after each search. Retreat is permitted only within 10 seconds of a completed forward step, with no intervening turn or retreat. Distance is not measured and the rear is unseen. Explore requires a clear floor area checked by you. Two stationary images confirm a find; then it centres and speaks one sentence in an AI-generated voice. No automatic approach or obstacle avoidance. Audio and photos stay in memory on the Pi. STOP, leaving the page, stale decisions, lost video or disconnection stops the search.</p></details>
         </div>
       </section>
       <section class="controls-panel" aria-label="Driving controls">
@@ -92,12 +113,12 @@
           <p id="notice" class="notice" role="status" aria-live="polite">Waiting for connection.</p>
         </div>
         <div class="drive-settings">
-          <label class="speed-label" for="speed">Test speed</label>
+          <label class="speed-label" for="speed">Driving speed</label>
           <select id="speed" aria-describedby="speed-help" disabled>
             <option value="slow">Slow · normal driving</option>
-            <option value="full">Full speed · 2-second test</option>
+            <option value="full">Full speed · hold to drive</option>
           </select>
-          <p id="speed-help" class="speed-help">For full speed, lift both wheels off the ground. Select a speed before taking control, then briefly hold forward or backward.</p>
+          <p id="speed-help" class="speed-help">Select a speed before taking control. Full speed continues while you hold a direction; release to stop. Test with wheels raised first, then drive in a clear area.</p>
           <details class="calibration">
             <summary>Adjust slow wheel speeds</summary>
             <p class="speed-help">Lower numbers reduce the command strength. Adjust the faster wheel by one step, then compare again. Test one direction at a time with wheels raised.</p>

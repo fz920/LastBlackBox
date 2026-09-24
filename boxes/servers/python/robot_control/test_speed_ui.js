@@ -106,8 +106,8 @@ async function main() {
   await settle();
   assert.equal(status.command, "stop");
   assert.equal(status.speed, "full");
-  // A server-enforced test limit releases control and resets the selector.
-  status = {...status, busy: false, speed: "slow", reason: "Full-speed test finished"};
+  // A server-enforced connection timeout releases control and resets the selector.
+  status = {...status, busy: false, speed: "slow", reason: "Control timed out"};
   await vm.runInContext("statusLoop()", context);
   assert.equal(element("speed").value, "slow");
   assert.equal(element("speed").disabled, false);
@@ -144,7 +144,7 @@ async function main() {
   assert.equal(element("claim").disabled, true);
   await element("apply-calibration").listeners.click();
   assert.deepEqual(status.calibration, defaults);
-  console.log("Full-speed UI checks passed: selection, claim, hold/release, limit, focus loss, Stop, slow default.");
+  console.log("Full-speed UI checks passed: selection, claim, hold/release, connection timeout, focus loss, Stop, slow default.");
   console.log("Calibration UI checks passed: defaults, stopped-only editing, validation, save without movement, reset.");
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

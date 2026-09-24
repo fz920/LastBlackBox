@@ -18,6 +18,7 @@ TOKEN = 'search-test-token-123456'
 
 def result(decision='absent', location=None):
     return {'decision': decision, 'location': location or ('centre' if decision == 'match' else 'unknown'),
+            'actions': ['right' if decision == 'absent' else 'inspect'], 'reason': 'Check the next useful view.',
             'description': 'A bottle is visible.' if decision == 'match' else 'No bottle visible.'}
 
 
@@ -30,6 +31,22 @@ class SearchMotorTests(unittest.TestCase):
         self.serial = FakeSerial()
         self.robot = Controller(self.frames, self.serial, clock=lambda: self.now)
         self.token = self.robot.claim(kind='search')
+
+    def test_custom_limits_enforced_at_motor_layer_and_reset_next_claim(self):
+        self.robot.release_search(self.token)
+        self.token = self.robot.claim(kind='search', explore=True, max_turns=1, max_steps=1)
+        self.robot.search_turn(self.token, 'left')
+        self.now += .31; self.frames.timestamp = self.now; self.robot.tick()
+        self.assertNotIn('left', self.robot.search_actions(self.token))
+        with self.assertRaises(ValueError): self.robot.search_turn(self.token)
+        self.robot.search_step(self.token, 'forward')
+        self.now += .41; self.frames.timestamp = self.now; self.robot.tick()
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'forward')
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'backward')
+        self.robot.release_search(self.token)
+        self.robot.claim(kind='search')
+        self.assertEqual(self.robot.search_turn_limit, 8)
+        self.assertEqual(self.robot.search_step_limit, 4)
 
     def test_fixed_slow_turn_deadline_stops_even_without_worker(self):
         self.robot.search_turn(self.token)
@@ -87,11 +104,84 @@ class SearchMotorTests(unittest.TestCase):
             self.robot.search_turn(self.token, 'left', centering=True)
         self.assertEqual(self.robot.search_turns, 0)
 
-    def test_centring_rejects_forward_backward_and_cannot_change_search_direction(self):
-        for direction, centering in [('forward', True), ('backward', True), ('left', False), ('right', 'true')]:
+    def test_centring_rejects_forward_backward_and_invalid_flags(self):
+        for direction, centering in [('forward', True), ('backward', True), ('up', False), ('right', 'true')]:
             with self.assertRaisesRegex(ValueError, 'Invalid'):
                 self.robot.search_turn(self.token, direction, centering=centering)
         self.assertEqual(self.serial.commands, [b'x'])
+
+    def explore(self):
+        self.robot.stop_all()
+        self.token = self.robot.claim(kind='search', explore=True)
+
+    def complete_step(self, direction):
+        self.frames.timestamp = self.now
+        duration = self.robot.search_step(self.token, direction)
+        self.assertEqual(self.serial.commands[-1], slow_command(direction, self.robot.calibration))
+        self.now += duration + .01
+        self.robot.tick()
+        self.assertEqual(self.robot.command, 'stop')
+        return duration
+
+    def test_forward_requires_explore_and_retreat_requires_completed_forward(self):
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'forward')
+        self.explore()
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'backward')
+        duration = self.robot.search_step(self.token, 'forward')
+        self.assertEqual(duration, .4)
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'backward')
+        self.now += .41; self.robot.tick()
+        self.assertEqual(self.complete_step('backward'), .3)
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'backward')
+
+    def test_turn_or_elapsed_time_invalidates_retreat(self):
+        for mode in ('turn', 'time'):
+            with self.subTest(mode=mode):
+                self.explore(); self.complete_step('forward')
+                self.assertIn('backward', self.robot.search_actions(self.token))
+                if mode == 'turn':
+                    self.robot.search_turn(self.token, 'left')
+                    self.now += .31; self.robot.tick()
+                else:
+                    self.now += 10.1
+                    self.robot.last_contact = self.now
+                self.frames.timestamp = self.now
+                with self.assertRaises(ValueError): self.robot.search_step(self.token, 'backward')
+
+    def test_step_budget_and_stop_cannot_be_bypassed_by_planner(self):
+        self.explore()
+        for _ in range(4): self.complete_step('forward')
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'forward')
+        self.assertNotIn('forward', self.robot.search_actions(self.token))
+        self.robot.stop_all()
+        manual = self.robot.claim()
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'forward')
+        self.robot.release_search(self.token)
+        self.assertEqual(self.robot.owner, manual)
+
+    def test_full_search_speed_uses_firmware_commands_and_same_short_deadlines(self):
+        self.robot.stop_all()
+        self.token = self.robot.claim('full', kind='search', explore=True)
+        for direction, expected in [('left', b'R'), ('right', b'L'), ('forward', b'B'), ('backward', b'F')]:
+            self.frames.timestamp = self.now
+            if direction in ('left', 'right'):
+                duration = self.robot.search_turn(self.token, direction)
+                self.assertEqual(duration, .3)
+            else:
+                duration = self.robot.search_step(self.token, direction)
+                self.assertEqual(duration, .4 if direction == 'forward' else .3)
+            self.assertEqual(self.serial.commands[-1], expected)
+            self.now += duration + .01; self.robot.tick()
+            self.assertEqual(self.serial.commands[-1], b'x')
+        self.frames.timestamp = self.now
+        self.robot.search_turn(self.token, 'left', centering=True)
+        self.assertEqual(self.serial.commands[-1], slow_command('left', self.robot.calibration))
+        self.now += .13; self.robot.tick()
+        self.robot.search_turn(self.token, 'right')
+        self.assertEqual(self.serial.commands[-1], b'L')
+        self.robot.stop_all()
+        self.assertEqual(self.robot.search_speed, 'slow')
+        with self.assertRaises(ValueError): self.robot.search_step(self.token, 'forward')
 
 
 class SearchTests(unittest.TestCase):
@@ -146,9 +236,188 @@ class SearchTests(unittest.TestCase):
     def movements(self):
         return [x for x in self.serial.commands if x != b'x']
 
+    def test_sequence_runs_three_moves_between_images_and_reports_history(self):
+        actions = ['forward', 'backward', 'left']
+        seen = []
+        def inspect(*args, **kwargs):
+            self.assertEqual(self.robot.command, 'stop')
+            seen.append(len(self.movements()))
+            return {**result(), 'actions': actions if len(seen) == 1 else ['stop']}
+        self.vision.inspect.side_effect = inspect
+        self.start(explore=True, speed='full', max_turns=12, max_steps=6); self.finish()
+        self.assertEqual(seen, [0, 3], 'No API check between actions in a plan')
+        self.assertEqual(self.movements(), [b'B', b'F', b'R'])
+        self.assertEqual((self.search.turns, self.search.steps), (1, 2))
+        context = self.vision.inspect.call_args.kwargs['context']
+        self.assertEqual((context['remaining_turns'], context['remaining_steps']), (11, 4))
+        self.assertEqual(context['max_sequence_length'], 3)
+        self.assertEqual([e['completed_action'] for e in context['history'] if 'completed_action' in e], actions)
+        commands = self.serial.commands
+        for i, command in enumerate(commands):
+            if command != b'x': self.assertEqual(commands[i + 1], b'x')
+
+    def test_invalid_whole_plan_never_executes_a_valid_prefix(self):
+        cases = [(['left', 'forward'], {}),
+                 (['forward', 'left', 'backward'], {'explore': True}),
+                 (['left', 'right', 'left'], {'max_turns': 2}),
+                 (['forward', 'forward'], {'explore': True, 'max_steps': 1}),
+                 (['left', 'right'], {'sequence_length': 1})]
+        for i, (actions, options) in enumerate(cases):
+            with self.subTest(actions=actions, options=options):
+                self.vision.inspect.return_value = {**result(), 'actions': actions}
+                self.start(token=TOKEN + str(i), **options); self.finish()
+                self.assertEqual(self.search.phase, 'error')
+                self.assertEqual(self.movements(), [])
+
+    def test_cancel_between_sequence_moves_prevents_remaining_actions(self):
+        self.vision.inspect.return_value = {**result(), 'actions': ['left', 'right']}
+        original = self.search._move_and_settle
+        def move(*args, **kwargs):
+            after = original(*args, **kwargs)
+            self.robot.stop_all()
+            return after
+        with patch.object(self.search, '_move_and_settle', side_effect=move):
+            self.start(); self.finish()
+        self.assertEqual(len(self.movements()), 1)
+        self.assertEqual(self.search.phase, 'cancelled')
+
+    def test_expiry_between_sequence_moves_prevents_remaining_actions(self):
+        self.vision.inspect.return_value = {**result(), 'actions': ['left', 'right']}
+        original = self.search._move_and_settle
+        def move(*args, **kwargs):
+            after = original(*args, **kwargs)
+            self.search.decision_time -= 9
+            return after
+        with patch.object(self.search, '_move_and_settle', side_effect=move):
+            self.start(); self.finish()
+        self.assertEqual(len(self.movements()), 1)
+        self.assertIn('expired', self.search.message)
+
+    def test_sequence_stops_on_camera_loss_or_deadline_between_moves(self):
+        original = self.search._move_and_settle
+        for kind in ('camera', 'deadline'):
+            self.serial.commands.clear()
+            self.vision.inspect.return_value = {**result(), 'actions': ['left', 'right']}
+            def move(*args, **kwargs):
+                after = original(*args, **kwargs)
+                with self.search.lock:
+                    if kind == 'camera':
+                        self.feed_frames = False
+                        self.frames.timestamp -= 3
+                    else:
+                        self.robot.search_deadline = time.monotonic() - 1
+                return after
+            with patch.object(self.search, '_move_and_settle', side_effect=move):
+                self.start(token=TOKEN + kind); self.finish()
+            self.assertEqual(len(self.movements()), 1)
+            self.assertEqual(self.search.phase, 'cancelled')
+            self.feed_frames = True
+            self.frames.write(b'fresh')
+
+    def test_zero_limits_inspect_without_search_motion_and_custom_limits_reset(self):
+        self.start(max_turns=0, max_steps=0, explore=True); self.finish()
+        self.assertEqual(self.movements(), [])
+        self.assertEqual(self.search.phase, 'not_found')
+        self.assertEqual(self.search.status()['max_turns'], 0)
+        self.start(token=TOKEN + 'default'); self.finish()
+        self.assertEqual(self.search.turns, 2)
+        self.assertEqual(self.search.max_turns, self.robot.SEARCH_MAX_TURNS)
+
+    def test_bad_limit_values_rejected_before_claim_or_api(self):
+        for field, values in {'max_turns': [-1, 25, True, 1.5, '8'],
+                              'max_steps': [-1, 13, False, 2.5, '4'],
+                              'sequence_length': [0, 4, True, None, '2']}.items():
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.start(**{field: value})
+        self.vision.inspect.assert_not_called()
+        self.assertEqual(self.serial.commands, [])
+
+    def test_planner_changes_direction_and_receives_completed_action_history(self):
+        self.vision.inspect.side_effect = [{**result(), 'actions': ['left']}, result(), result('match'), result('match')]
+        self.start(); self.finish()
+        self.assertEqual(self.movements(), [slow_command(d, self.robot.calibration) for d in ('left', 'right')])
+        contexts = [call.kwargs['context'] for call in self.vision.inspect.call_args_list]
+        self.assertEqual(contexts[0]['history'], [])
+        self.assertTrue(any(event.get('completed_action') == 'left' for event in contexts[1]['history']))
+        self.assertNotIn('forward', contexts[0]['allowed_actions'])
+        self.assertTrue(self.search.centered)
+
+    def test_explore_forward_retreat_then_stop_is_bounded_and_reported(self):
+        self.vision.inspect.side_effect = [{**result(), 'actions': [action]} for action in ('forward', 'backward', 'stop')]
+        self.start(explore=True); self.finish()
+        self.assertEqual(self.movements(), [slow_command(d, self.robot.calibration) for d in ('forward', 'backward')])
+        self.assertEqual(self.search.steps, 2)
+        self.assertEqual(self.search.phase, 'not_found')
+        contexts = [call.kwargs['context'] for call in self.vision.inspect.call_args_list]
+        self.assertNotIn('backward', contexts[0]['allowed_actions'])
+        self.assertIn('backward', contexts[1]['allowed_actions'])
+        self.assertNotIn('backward', contexts[2]['allowed_actions'])
+        self.assertEqual(self.search.status()['action'], 'stop')
+
+    def test_full_speed_search_then_calibrated_centring_and_next_search_defaults(self):
+        self.vision.inspect.side_effect = [{**result(), 'actions': ['forward']}, result('match', 'left'),
+            result('match', 'left'), result('match'), result('match')]
+        self.start(explore=True, speed='full'); self.finish()
+        self.assertEqual(self.movements(), [b'B', slow_command('left', self.robot.calibration)])
+        self.assertTrue(self.search.centered)
+        self.assertEqual(self.search.status()['speed'], 'full')
+        self.vision.inspect.side_effect = [result(), result('match'), result('match')]
+        self.start(token=TOKEN + 'next'); self.finish()
+        self.assertEqual(self.movements()[-1], slow_command('right', self.robot.calibration))
+        self.assertEqual(self.search.status()['speed'], 'slow')
+
+    def test_unarmed_forward_and_backward_after_turn_are_rejected(self):
+        self.vision.inspect.return_value = {**result(), 'actions': ['forward']}
+        self.start(); self.finish()
+        self.assertEqual(self.search.phase, 'error')
+        self.assertEqual(self.movements(), [])
+        self.vision.inspect.side_effect = [{**result(), 'actions': [action]} for action in ('forward', 'left', 'backward')]
+        self.start(explore=True, token=TOKEN + 'explore'); self.finish()
+        self.assertEqual(self.search.phase, 'error')
+        self.assertEqual(self.movements(), [slow_command(d, self.robot.calibration) for d in ('forward', 'left')])
+
+    def test_latest_verification_decision_replaces_false_candidate(self):
+        self.vision.inspect.side_effect = [result('match'), {**result(), 'actions': ['left']},
+                                          result('match'), result('match')]
+        self.start(); self.finish()
+        self.assertEqual(self.movements(), [slow_command('left', self.robot.calibration)])
+
+    def test_old_decision_and_uncertain_movement_are_rejected(self):
+        def delayed(*args, **kwargs):
+            time.sleep(.02)
+            return {**result(), 'actions': ['forward']}
+        self.vision.inspect.side_effect = delayed
+        with patch('object_search.MAX_DECISION_AGE', .01):
+            self.start(explore=True); self.finish()
+        self.assertIn('too late', self.search.message)
+        self.vision.inspect.side_effect = None
+        self.vision.inspect.return_value = {**result('uncertain'), 'actions': ['forward']}
+        self.start(explore=True, token=TOKEN + 'uncertain'); self.finish()
+        self.assertEqual(self.search.phase, 'error')
+        self.assertEqual(self.movements(), [])
+
+    def test_stop_during_forward_and_late_api_reply_cannot_restart_motion(self):
+        self.robot.SEARCH_STEP_SECONDS = .3
+        self.vision.inspect.return_value = {**result(), 'actions': ['forward']}
+        self.start(explore=True)
+        deadline = time.monotonic() + 1
+        while self.robot.command == 'stop' and time.monotonic() < deadline: time.sleep(.005)
+        self.assertEqual(self.robot.command, 'forward')
+        self.robot.stop_all(); self.finish()
+        self.assertEqual(len(self.movements()), 1)
+        entered, release = threading.Event(), threading.Event()
+        self.vision.inspect.side_effect = lambda *a, **kw: (entered.set(), release.wait(2), result())[2]
+        self.start(explore=True, token=TOKEN + 'late')
+        self.assertTrue(entered.wait(1))
+        self.search.cancel(); manual = self.robot.claim()
+        release.set(); self.search.thread.join(2)
+        self.assertEqual(self.robot.owner, manual)
+        self.assertEqual(len(self.movements()), 1)
+
     def test_match_requires_two_different_stationary_images_and_no_turn(self):
         images = []
-        def inspect(key, target, jpeg, cancel):
+        def inspect(key, target, jpeg, cancel, **kwargs):
             self.assertEqual(self.robot.command, 'stop')
             images.append(jpeg)
             return result('match')
@@ -169,7 +438,7 @@ class SearchTests(unittest.TestCase):
                 replies = iter([result('match', direction), result('match', direction),
                                 result('match'), result('match')])
                 images = []
-                def inspect(key, target, jpeg, cancel):
+                def inspect(key, target, jpeg, cancel, **kwargs):
                     self.assertEqual(self.robot.command, 'stop')
                     images.append(jpeg)
                     return next(replies)
@@ -191,13 +460,13 @@ class SearchTests(unittest.TestCase):
         self.assertTrue(self.search.centered)
         self.assertEqual(self.search.checks, 5)
 
-    def test_horizontal_camera_flip_reverses_only_centring_direction(self):
+    def test_horizontal_camera_flip_reverses_search_and_centring_directions(self):
         self.search.mirrored = True
         self.vision.inspect.side_effect = [result(), result('match', 'left'), result('match', 'left'),
                                           result('match'), result('match')]
         self.start()
         self.finish()
-        self.assertEqual(self.movements(), [slow_command('right', self.robot.calibration)] * 2)
+        self.assertEqual(self.movements(), [slow_command(d, self.robot.calibration) for d in ('left', 'right')])
         self.assertTrue(self.search.centered)
 
     def test_unstable_centre_needs_two_consecutive_images_at_the_same_pose(self):
@@ -254,7 +523,7 @@ class SearchTests(unittest.TestCase):
     def test_cancel_after_centring_turn_prevents_late_reply_from_moving_new_driver(self):
         entered, release = threading.Event(), threading.Event()
         calls = 0
-        def inspect(*args):
+        def inspect(*args, **kwargs):
             nonlocal calls
             calls += 1
             if calls == 3:
@@ -327,7 +596,7 @@ class SearchTests(unittest.TestCase):
         speech.stop.assert_called_once()
 
     def test_false_candidate_is_not_announced_as_found(self):
-        self.vision.inspect.side_effect = [result('match'), result('uncertain'), result(), result()]
+        self.vision.inspect.side_effect = [result('match'), result('uncertain'), result(), result(), result()]
         self.start()
         self.finish()
         self.assertEqual(self.search.phase, 'not_found')
@@ -335,7 +604,7 @@ class SearchTests(unittest.TestCase):
 
     def test_cancel_while_api_blocked_never_moves_after_late_reply(self):
         entered, release = threading.Event(), threading.Event()
-        def inspect(*args):
+        def inspect(*args, **kwargs):
             entered.set()
             release.wait(2)
             return result()
@@ -375,7 +644,8 @@ class SearchTests(unittest.TestCase):
 
     def test_explicit_enable_valid_target_live_video_and_key_required(self):
         for kwargs in ({'allow_turns': False}, {'allow_turns': 'true'}, {'target': ''},
-                       {'target': 'x' * 101}, {'frame_time': 0}, {'stop_generation': True}):
+                       {'target': 'x' * 101}, {'frame_time': 0}, {'stop_generation': True}, {'explore': 'true'},
+                       {'speed': 'turbo'}, {'speed': True}):
             with self.assertRaises(ValueError):
                 self.start(**kwargs)
         self.search.key_provider = lambda: ''
@@ -388,7 +658,7 @@ class SearchTests(unittest.TestCase):
         for kind in ('browser', 'camera'):
             with self.subTest(kind=kind):
                 entered, release = threading.Event(), threading.Event()
-                def inspect(*args):
+                def inspect(*args, **kwargs):
                     entered.set()
                     release.wait(2)
                     return result('match')
@@ -428,11 +698,11 @@ class SearchTests(unittest.TestCase):
             self.start()
             self.finish()
         self.assertEqual(self.vision.inspect.call_count, 2)
-        self.assertEqual(self.search.turns, 1)
+        self.assertEqual(self.search.turns, 0)
 
     def test_search_claim_blocks_manual_driver_and_calibration(self):
         entered, release = threading.Event(), threading.Event()
-        self.vision.inspect.side_effect = lambda *args: (entered.set(), release.wait(1), result())[2]
+        self.vision.inspect.side_effect = lambda *args, **kwargs: (entered.set(), release.wait(1), result())[2]
         self.start()
         self.assertTrue(entered.wait(1))
         with self.assertRaises(ValueError):
@@ -464,7 +734,15 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(post(path, {})[0], 403)
             self.assertEqual(post(path, {'X-Robot-Control': '1', 'Origin': 'http://evil.example'})[0], 403)
             self.assertEqual(post(path, {'X-Robot-Control': '1'}, allow_turns=False)[0], 409)
-            self.assertEqual(post(path, {'X-Robot-Control': '1'})[0], 200)
+            self.assertEqual(post(path, {'X-Robot-Control': '1'}, explore='true')[0], 409)
+            self.assertEqual(post(path, {'X-Robot-Control': '1'}, speed='turbo')[0], 409)
+            self.assertEqual(post(path, {'X-Robot-Control': '1'}, live='true')[0], 409)
+            self.assertEqual(post(path, {'X-Robot-Control': '1'}, image_rate=99)[0], 409)
+            self.assertEqual(post(path, {'X-Robot-Control': '1'}, explore=True, speed='full',
+                                  max_turns=12, max_steps=6, sequence_length=2)[0], 200)
+            self.assertTrue(self.search.explore)
+            self.assertEqual(self.search.speed, 'full')
+            self.assertEqual((self.search.max_turns, self.search.max_steps, self.search.sequence_length), (12, 6, 2))
             self.assertEqual(post('/api/stop', {'X-Robot-Control': '1'})[0], 200)
             self.finish()
             self.assertEqual(self.search.phase, 'cancelled')
@@ -495,6 +773,16 @@ class VisionTests(unittest.TestCase):
         self.assertNotIn('secret-test-key', request.kwargs['body'])
         connection.close.assert_called()
 
+    def test_plan_schema_rejects_unbounded_ambiguous_and_malformed_sequences(self):
+        for actions in ([], ['left'] * 4, 'left', [None], [{}], ['fly'],
+                        ['inspect', 'left'], ['stop', 'forward']):
+            with self.subTest(actions=actions), self.assertRaises(SearchError):
+                validate_result({**result(), 'actions': actions})
+        for decision in ('match', 'uncertain'):
+            with self.assertRaises(SearchError):
+                validate_result({**result(decision), 'actions': ['left', 'inspect']})
+        validate_result({**result(), 'actions': ['forward', 'left', 'inspect']})
+
     def test_errors_are_sanitized_and_invalid_data_rejected(self):
         with patch('search_vision.http.client.HTTPSConnection') as factory:
             factory.return_value.request.side_effect = RuntimeError('Bearer secret-test-key')
@@ -503,6 +791,9 @@ class VisionTests(unittest.TestCase):
             self.assertNotIn('secret-test-key', str(error.exception))
         with self.assertRaises(SearchError):
             validate_result({**result(), 'turn': 'forward'})
+        for change in ({'actions': ['drive_forever']}, {'reason': ''}, {'duration': 999},
+                       {'decision': 'match', 'actions': ['forward']}):
+            with self.assertRaises(SearchError): validate_result({**result(), **change})
 
 
 if __name__ == '__main__':

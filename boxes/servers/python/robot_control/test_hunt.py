@@ -142,6 +142,7 @@ class HuntTests(unittest.TestCase):
         self.audio_lock = threading.Lock()
         self.vision = Mock()
         self.vision.inspect.return_value = {'decision': 'match', 'location': 'centre',
+                                          'actions': ['inspect'], 'reason': 'Confirm the red container.',
                                           'description': 'A red cup sits on the desk.'}
         self.speech = Mock(lock=threading.RLock(), cancel=threading.Event(), error='')
         self.hunt = Hunt(self.robot, lambda: 'test-key', self.speech, self.vision, audio_lock=self.audio_lock)
@@ -181,7 +182,7 @@ class HuntTests(unittest.TestCase):
 
     def test_typed_clue_automatically_searches_centres_and_announces(self):
         match = self.vision.inspect.return_value
-        self.vision.inspect.side_effect = [{**match, 'decision': 'absent', 'location': 'unknown'},
+        self.vision.inspect.side_effect = [{**match, 'decision': 'absent', 'location': 'unknown', 'actions': ['right']},
             {**match, 'location': 'left'}, {**match, 'location': 'left'}, match, match]
         self.start(); self.finish()
         self.hunt.microphone.record.assert_not_called()
@@ -293,9 +294,17 @@ class HuntTests(unittest.TestCase):
                 self.assertEqual(post(action, {}), 403)
                 self.assertEqual(post(action, {'X-Robot-Control': '1', 'Origin': 'http://elsewhere'}), 403)
             with patch.object(self.hunt, 'start', return_value={'accepted': True}) as start:
-                self.assertEqual(post('start', {'X-Robot-Control': '1'}, target='你' * 500), 200)
+                self.assertEqual(post('start', {'X-Robot-Control': '1'}, target='你' * 500, live=True, image_rate=4), 200)
                 self.assertEqual(start.call_args.args[1], '你' * 500)
-                self.assertEqual(post('listen', {'X-Robot-Control': '1'}), 200)
+                self.assertTrue(start.call_args.kwargs['live'])
+                self.assertEqual(start.call_args.kwargs['image_rate'], 4)
+                self.assertEqual(post('listen', {'X-Robot-Control': '1'},
+                                      max_turns=18, max_steps=8, sequence_length=2, live=True, image_rate=.5), 200)
+                self.assertEqual(start.call_args.kwargs['max_turns'], 18)
+                self.assertEqual(start.call_args.kwargs['max_steps'], 8)
+                self.assertEqual(start.call_args.kwargs['sequence_length'], 2)
+                self.assertTrue(start.call_args.kwargs['live'])
+                self.assertEqual(start.call_args.kwargs['image_rate'], .5)
                 self.assertIsNone(start.call_args.args[1])
             with patch.object(self.hunt, 'finish_recording', return_value={'accepted': True}) as finish:
                 self.assertEqual(post('finish', {'X-Robot-Control': '1'}), 200)

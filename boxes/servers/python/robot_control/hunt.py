@@ -101,7 +101,8 @@ class Hunt(ObjectSearch):
                 state.update(ready=False, error='Run setup-realtime.sh on the Pi first.')
             return state
 
-    def start(self, token, target, allow_turns, frame_time, stop_generation):
+    def start(self, token, target, allow_turns, frame_time, stop_generation, *, explore=False, speed='slow',
+              max_turns=None, max_steps=None, sequence_length=3, live=False, image_rate=2):
         if target is not None and (not isinstance(target, str) or not target.strip() or len(target) > MAX_CLUE):
             raise ValueError('Describe what to find in 1–500 characters.')
         with self.lock:
@@ -123,7 +124,9 @@ class Hunt(ObjectSearch):
             self.released = threading.Event()
             self.capture_device, self.audio_owned = device, owned
             try:
-                super().start(token, 'your clue', allow_turns, frame_time, stop_generation)
+                super().start(token, 'your clue', allow_turns, frame_time, stop_generation, explore=explore, speed=speed,
+                              max_turns=max_turns, max_steps=max_steps, sequence_length=sequence_length,
+                              live=live, image_rate=image_rate)
             except Exception:
                 if owned:
                     self.audio_lock.release()

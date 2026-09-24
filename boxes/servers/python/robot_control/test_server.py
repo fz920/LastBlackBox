@@ -9,7 +9,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from http.server import ThreadingHTTPServer
 
-from server import Controller, Frames, Handler, LEASE, WATCHDOG, FULL_SPEED_LIMIT, DEFAULT_CALIBRATION
+from server import Controller, Frames, Handler, LEASE, WATCHDOG, DEFAULT_CALIBRATION
 
 
 class FakeSerial:
@@ -143,23 +143,28 @@ class ControlTests(unittest.TestCase):
         self.robot.control(token, 1, "forward", self.frames.timestamp)
         self.assertEqual(self.serial.commands[-1], b"@664E\n")
 
-    def test_full_speed_limit_survives_heartbeats_and_direction_changes(self):
+    def test_full_speed_continues_with_heartbeats_and_direction_changes(self):
         token = self.robot.claim("full")
         start = self.now
-        for sequence in range(10):
+        for sequence in range(31):
             self.now = start + sequence * 0.2
             self.frames.write(b"jpeg")
             self.frames.timestamp = self.now
             self.robot.control(token, sequence, "forward" if sequence % 2 else "backward", self.now)
-        self.now = start + FULL_SPEED_LIMIT
+        self.now += .1
         self.robot.tick()
         status = self.robot.status()
-        self.assertEqual(status["command"], "stop")
-        self.assertFalse(status["busy"])
-        self.assertEqual(status["speed"], "slow")
-        self.assertIn("test finished", status["reason"])
-        with self.assertRaises(ValueError):
-            self.robot.control(token, 11, "forward", self.now)
+        self.assertEqual(status["command"], "backward")
+        self.assertTrue(status["busy"])
+        self.assertEqual(status["speed"], "full")
+        self.robot.control(token, 31, "stop", self.now)
+        self.assertEqual(self.robot.command, "stop")
+        self.assertEqual(self.serial.commands[-1], b'x')
+        self.assertEqual(self.robot.owner, token)
+        self.robot.control(token, 32, "forward", self.now)
+        self.assertEqual(self.robot.command, "forward")
+        self.robot.stop_all()
+        self.assertIsNone(self.robot.owner)
 
     def test_full_speed_disconnect_and_stale_video_still_stop(self):
         for failure in ("timeout", "video"):

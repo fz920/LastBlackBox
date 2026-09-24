@@ -303,15 +303,34 @@ Start or restart the website in your terminal from the repository root:
    select **Find from text**, or hold **Hold to give a clue**, speak near the
    robot's ears and release. Typed clues can be up to 500 characters; recordings
    must be shorter than 15 seconds. You can also hold Enter while the voice button
-   is focused. The checkbox resets after starting/cancelling each search.
+   is focused. Optionally check **Explore: allow forward steps and retreat** to
+   permit short translations in a clear area you have checked. Both checkboxes
+   reset after starting/cancelling each search. Explore is off by default.
+   **Movement speed** defaults to **Calibrated speed**; choose **Full speed · short
+   bursts** for maximum servo output during search turns and Explore steps. This
+   selection applies to one search and resets on completion or cancellation.
+   Set **Search turns** (0–24, default 8), **Explore steps** (0–12, default 4),
+   and **Moves per image** (1–3, default 3) before starting. These budgets count
+   individual motor pulses, not API requests; steps share the forward/backward
+   budget and require Explore enabled. Zero disables that category of search
+   movement. Centring has its own fixed limit. Settings remain in the page for
+   the next search, reset on page reload, and cannot change a running search.
 4. Try **Find a blue water bottle** or **Find something red I could drink from**.
    The wheels stay stopped while the API interprets the clue. The page shows
    the understood request and search criteria, then searching starts automatically.
    An ambiguous clue prompts a spoken/on-screen question without moving. Re-enable
    turns and give a new, complete clue to answer it; search clues have no chat history.
-5. The robot inspects a stationary image. If it cannot confirm the target, it
-   turns right at calibrated slow speed for 0.3 seconds, stops, waits for the
-   camera to settle, and checks a new image.
+5. The robot inspects a stationary image. GPT proposes an ordered sequence of
+   up to **Moves per image** actions, using the image and up to eight recent
+   observation/action records. For example: forward → backward → left.
+   Turns are always available within their budget; Explore additionally permits
+   forward and eligible retreats. Inspect or stop can be the final action.
+   The page shows the plan, its current action number, and a brief reason.
+   Each pulse stops and settles, but **no new image assessment happens between
+   actions in a sequence**. After the sequence, it checks a fresh stationary
+   image and replans. Choose 1 to restore a check after each movement. Larger
+   sequences can miss objects passed between views; especially at full speed,
+   supervise in a cleared area. History is not a map or measured position.
 6. A possible match needs a second, newer stationary image to agree. The robot
    then turns left or right in **0.12-second slow steps**, stopping and settling
    before each new image. It aims to put the object's horizontal midpoint within
@@ -321,6 +340,85 @@ Start or restart the website in your terminal from the repository root:
    the find in one sentence using OpenAI's Marin voice. Check the picture yourself:
    two model checks can still make the same mistake.
 
+### Search memory
+
+Both search modes now keep a diary for the current search. Expand **Search memory**
+in the result panel to see inspected thumbnails, evidence, elapsed time, completed
+or interrupted timed movements, and likely revisits. The diary holds at most
+30 checked views in RAM, with thumbnails no larger than 160×120; it writes no
+images or history to disk. It resets automatically for each new search, including
+a new spoken clue. **Clear memory** is available once the search has stopped.
+The previous diary remains available after completion until cleared or replaced.
+
+A local spatial-colour comparison suggests whether the current image resembles
+an earlier view. Blank or low-detail images are not matched. GPT receives a
+bounded text summary of relevant previous views and actual movement outcomes,
+alongside the current image. It is instructed to try a different useful viewpoint
+when an earlier sequence has revisited the same views, or stop when no useful
+permitted alternative remains. Memory thumbnails are not uploaded as extra images.
+These are visual hints, not measured positions, distances, a map or proof of
+clearance. Similarity can miss revisits or mistake similar scenes for one another.
+An interrupted command is never recorded as a completed movement.
+
+Every stationary assessment still uses a fresh image, including both target
+confirmation checks. In Live mode, only near-identical **stopped, settling**
+background frames may skip an assessment following an absent result in the same
+plan. A fresh background check is due within one second; movement, a changed view,
+a new plan, or a foreground request bypasses this suppression. The website shows
+skipped monitor frames separately from uploads and completed assessments. Upload
+rate and both models are unchanged. Memory may reduce repeated search loops, but
+its text summary also adds input tokens, so cost savings are not guaranteed.
+
+Memory uses the system Pillow package already installed with this Pi's camera
+environment. Regression checks use generated images and simulated hardware:
+`python3 -B -m unittest test_search_memory test_search test_live_search` and
+`node test_search_ui.js`. No paid API call is needed to run these tests.
+
+### Live search and image rate
+
+Choose **Look around → Search mode → Live search**, then choose **Images per
+second**: **0.5, 1, 2 (default), or 4**. These settings apply to both typed and
+spoken searches, are locked while searching, and reset to Snapshot search / 2
+images per second on page reload. The mode does not arm the robot: the existing
+movement checkbox, Explore permission, speed and per-search budgets still apply.
+
+Live search uses a separate persistent `gpt-realtime` connection for the visual
+search. It starts after the clue is understood and closes on completion,
+cancellation or failure. The camera feed continues uploading while timed moves
+run and while GPT is generating an assessment. Images are sampled at up to the
+selected rate, with no unsent frame queue or catch-up bursts. The page reports
+actual upload rate, images sent, completed assessments and the most recent
+response latency. An uploaded image is not necessarily assessed: one assessment
+runs at a time, and newer frames replace older views waiting for attention.
+Higher image rates can increase bandwidth and API usage without speeding up GPT.
+
+The session retains at most three recent image items plus an image pinned by an
+active assessment. Each response explicitly references its assessed frame and
+receives current search context; old image items are deleted rather than growing
+an unbounded conversation. Only images and assessment text are used here; the
+existing voice/clue and spoken-announcement features remain separate. No photos
+or videos are written to disk. There is no local model download or new dependency.
+The transport follows the official [Realtime image and conversation guide](https://developers.openai.com/api/docs/guides/realtime-conversations).
+
+During movement and settling, background assessments may interrupt the current
+sequence for a possible match, uncertainty or a stop request. They cannot authorize
+new motion or count as a confirmed find. A possible match is rechecked in fresh
+stationary images using the normal two-image confirmation and centring logic.
+Interrupted forward pulses do not authorize retreat. Late observations are tied
+to their search and plan, and observations over two seconds old cannot interrupt
+a new movement. STOP, lost video, a disconnected browser, invalid responses and
+API failures still end the search; a failed Live session never silently changes
+to Snapshot mode. An API response timeout is eight seconds; motor pulses keep
+their much shorter independent deadlines throughout.
+
+Both modes retain the **90-second total deadline and 20 stationary assessments**.
+Live mode additionally permits up to **20 background monitoring assessments**,
+then stops if another is needed. Images sent and assessments are different
+counters; image uploads are bounded by the selected rate and total deadline.
+The robot can still pause waiting for GPT. This is interruptible short movement
+with ongoing image uploads, not guaranteed instantaneous reaction or obstacle
+avoidance. Choose Snapshot search to retain the original between-sequence checks.
+
 The result panel reports whether centring was confirmed or stopped at a limit.
 If the target becomes absent or uncertain, centring ends immediately without
 resuming the search. An unclear position (including ambiguous multiple matches)
@@ -329,7 +427,26 @@ found, with an explicit note that centring was not confirmed. A lost target is
 not announced as a current find. Describe a distinctive, stationary object for
 best results; this is approximate visual alignment, not precise tracking.
 The server accounts for `--flip horizontal` / `--flip both` when choosing a
-centring direction; the webpage's vertical flip does not change steering.
+search or centring direction; the webpage's vertical flip does not change steering.
+
+Explore uses the selected movement speed, with **0.40-second forward steps**
+and **0.30-second backward retreats**, up to your selected **Explore steps** budget (default four).
+The controller permits one retreat only after a completed forward step, within
+10 seconds and with no intervening turn or retreat. A new forward step replaces
+that opportunity. Backward distance is not measured and this does not guarantee
+retracing the same path: the rear camera view is unavailable. Supervise on clear,
+level floor away from stairs, edges, people and pets. Start with a wheel-direction
+check with the wheels lifted; then measure a short step on the floor before
+further exploration. There is no obstacle sensing or automatic approach to a find.
+
+Full speed uses the existing Arduino uppercase commands, bypassing the four
+saved wheel trim settings. Search turns remain 0.3 seconds, forward steps 0.40
+seconds and retreats 0.30 seconds; the robot may travel farther per pulse.
+Centring always uses the saved calibrated speed for precision. The independent
+Arduino watchdog remains enabled. Search steps still have individual Pi-enforced deadlines. Choosing the option
+does not move the robot; movement starts only with an explicitly armed search.
+The running search shows **FULL SPEED** in its progress line. Check full-speed
+wheel directions with the wheels raised before a supervised floor test.
 
 Successful matches use one extra text-to-speech call (`gpt-4o-mini-tts`, Marin),
 with the same API key. The sentence includes the target, image position and a
@@ -344,13 +461,15 @@ is skipped; if the speech API fails, the result remains visible with a voice
 error. Unsuccessful searches and offline Coral descriptions retain local speech.
 The implementation follows the official [OpenAI speech guide](https://developers.openai.com/api/docs/guides/text-to-speech).
 
-The application permits at most **8 search turns plus 6 centring turns**, with
+The application defaults to **8 search turns** and, when Explore is enabled,
+**4 forward/backward steps**. The website permits at most **24 search turns**
+and **12 steps** per search; **6 centring turns** remain a separate fixed limit, with
 **20 image checks and 90 seconds shared across the whole operation**, including
 recording and clue interpretation. A turn
 resets the consecutive-centred-image count; reaching a limit always stops movement. There is no full-circle or degree guarantee because this
 robot does not measure wheel rotation. Its position may drift as it turns. It
-never approaches the object or drives forward/backward as part of a search, and
-it has no obstacle avoidance. If unsuccessful, it reports that it could not
+stops travelling once a match is confirmed and has no obstacle avoidance.
+With Explore off, only turns are permitted. If unsuccessful, it reports that it could not
 confirm the object **from here**, rather than claiming the object is absent.
 
 **STOP** or **Stop search** immediately releases the search's motor control.
@@ -363,9 +482,18 @@ motors exclusively, so manual driving and calibration cannot compete with it.
 A late API response cannot resume cancelled motion or stop a newly claimed driver.
 The program reads a new image only after stopping and settling. The clue interpreter
 supplies validated search criteria or a clarification question; the vision model
-supplies a match assessment, image position and description. Local code maps left/right
-positions to fixed slow centring steps; the model cannot supply motor commands,
-speeds, durations, or turn limits.
+supplies a match assessment, image position, description and proposed sequence.
+In Snapshot mode, the array uses OpenAI [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
+Local code validates the whole sequence, simulating budgets and retreat eligibility,
+before its first pulse. It rechecks permissions, camera/browser freshness, the
+search deadline and decision age before every action, then issues a fixed-duration
+pulse at the user-selected speed. An invalid plan stops without executing a valid
+prefix. Match/uncertain replies permit only inspect or stop; centring still looks
+after each individual turn. Visual replies and remaining plan actions based on
+images older than eight seconds are discarded without further movement. GPT cannot supply speeds, durations, new actions or turn limits.
+Two stationary checks still confirm a match; local centring uses the model's
+left/right position with shorter pulses. API errors stop the operation, without
+falling back to an automatic sweep. Snapshot search keeps the wheels stopped during API calls; Live monitoring can run during bounded movements.
 
 The typed clue or released microphone recording goes to OpenAI in a separate,
 short-lived Realtime session. Recording uses the robot's microphones, not your
@@ -375,7 +503,7 @@ are not submitted; audio is capped at 720 KB and stays in RAM.
 Each search makes one clue-interpretation request before any image checks.
 
 The interpreted description and each checked JPEG go directly to OpenAI through the Responses
-API with `store: false`, structured output, and a 300-token output cap. That setting
+API with `store: false`, structured output, a short history and a 450-token output cap. That setting
 does not override OpenAI's API data-retention policies. Search keeps only the
 matched JPEG and small status fields after completion; no search photos or audio
 are written to disk. Clue interpretation, image checks and cloud speech incur API
@@ -390,7 +518,8 @@ use the dedicated Look around tab to explicitly authorize a physical search.
 The implementation follows the official [vision input guide](https://developers.openai.com/api/docs/guides/images-vision)
 and [structured output guide](https://developers.openai.com/api/docs/guides/structured-outputs).
 `test_search.py` exercises bounded turns, the two-image match check, fresh frames,
-API errors, STOP races, disconnects, exclusive ownership and HTTP protection using
+adaptive choices and history, exploration opt-in, retreat eligibility, independent
+step deadlines, stale decisions, API errors, STOP races, disconnects, exclusive ownership and HTTP protection using
 simulated serial hardware. `test_search_ui.js` checks explicit enable, stale video,
 manual-control conflicts, cancel ordering, hold/release ordering and matched-image
 display. `test_hunt.py` exercises typed/audio clue handoff, clarification without
@@ -423,27 +552,30 @@ By default, slow curves use an offset of 12 on the outside wheel and 6 on the
 inside wheel. With calibration, the inner wheel uses half its directional
 setting, rounded up.
 These are control settings, not measured wheel speeds; the actual curve depends
-on the servos, surface and load. The server requires **NB3-DEMO-5** firmware,
+on the servos, surface and load. The server requires **NB3-DEMO-6** firmware,
 so re-upload the sketch when upgrading from the initial controller version.
 
 ## Compare slow and full speed
 
 Keep both wheels raised off the ground for this comparison. Refresh the website,
-choose **Full speed · 2-second test** under **Test speed**, then **Take control**.
+choose **Full speed · hold to drive** under **Driving speed**, then **Take control**.
 Briefly hold forward, release it, then try backward. Straight full-speed motion
 uses `Servo.write(0)` and `Servo.write(180)`, matching the original remote-NB3
 sketch's command range while retaining the corrected website directions.
 
-Each uninterrupted full-speed movement is capped at two seconds by both the Pi
-and Arduino. The Arduino blocks further full-speed commands after its limit
-until Stop is received. The normal 500 ms Pi / 600 ms Arduino disconnect
-timeouts still apply. Releasing the direction stops immediately; the STOP button,
-loss of control, or the Pi's test limit also resets the selection to slow.
-Choose full speed again before taking control for another test after that reset.
+Manual full-speed movement continues while you hold a direction and fresh
+commands keep arriving; there is no two-second movement cap. The normal 500 ms
+Pi / 600 ms Arduino disconnect timeouts still apply. Releasing the direction
+stops immediately; STOP or loss of control also resets the selection to slow.
+Choose full speed again before taking control after that reset. Search still
+uses timed pulses (0.40 seconds forward, 0.30 seconds backward); increasing these
+further requires accounting for both watchdogs, not simply changing a duration.
+Install **NB3-DEMO-6** before restarting the website: older firmware retains
+its two-second cutoff and is rejected by the new server.
 The speed selector is locked while someone has control. Slow remains the default;
 its default output and both servos' stop values are unchanged.
 
-This feature requires the included **NB3-DEMO-5** firmware. Full-speed movement
+This feature requires the included **NB3-DEMO-6** firmware. Full-speed movement
 uses uppercase serial direction letters. Calibrated slow movement uses a
 bounded packet containing both servo settings; legacy lowercase commands
 remain available with their original fixed offsets.
@@ -521,7 +653,7 @@ lower signal on D10; left/right turns are reversed too. Curves reverse travel
 while retaining the slower inner wheel. Browser labels and status still show
 the requested direction. No firmware upload is needed for this correction;
 do not also reverse the firmware signs, which would undo the correction.
-The current speed and calibration options require uploading the NB3-DEMO-5 sketch.
+The current speed and calibration options require uploading the NB3-DEMO-6 sketch.
 It is **not** the DC-motor/H-bridge sketch. Keep motors disconnected during upload.
 
 With Arduino CLI and its AVR core / Servo library installed:
@@ -539,6 +671,13 @@ The backup taken before adding full speed is
 `_tmp/robot-control/before-calibration-20260923.hex`. The firmware identification
 and Stop commands were verified after upload. Basic physical movement was then
 confirmed by the user. The new steering combinations still need a physical check.
+
+On 2026-09-24, NB3-DEMO-6 was compiled and uploaded to this robot to remove
+the manual full-speed cutoff. Its identification and STOP handshake passed; no
+physical movement test was run. The prior flash image is saved at
+`_tmp/robot-control/before-continuous-full-speed-20260924.hex`. The updated
+software passed all 145 Python tests (including compiled firmware simulation)
+and six JavaScript suites.
 
 For other Nanos with the old bootloader, use `arduino:avr:nano:cpu=atmega328old`
 for both commands. Stop anything using the serial port before uploading.

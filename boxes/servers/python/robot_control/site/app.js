@@ -56,7 +56,7 @@ function render() {
     button.classList.toggle("active", desired.split("_").includes(button.dataset.direction));
   }
   if (state) {
-    $("mode").textContent = state.mode === "preview" ? "Preview mode · motor output disabled" : (state.fault ? "Arduino disconnected" : (state.speed === "full" ? "Arduino connected · FULL SPEED · 2-second limit" : "Arduino connected · slow speed"));
+    $("mode").textContent = state.mode === "preview" ? "Preview mode · motor output disabled" : (state.fault ? "Arduino disconnected" : (state.speed === "full" ? "Arduino connected · FULL SPEED · hold to drive" : "Arduino connected · slow speed"));
     $("command").textContent = online ? state.command.replaceAll("_", " ") : "Unknown";
   }
 }

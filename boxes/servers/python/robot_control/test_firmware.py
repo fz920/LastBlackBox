@@ -114,22 +114,22 @@ int main(){
   }
   command('e'); command('!'); wheels(90,90); assert(!moving);
   command('?');
-  assert(Serial.reply=="NB3-DEMO-5 SERVO WATCHDOG=600 SPEED=12 FULL=90 LIMIT=2000 TRIM=24 LEFT=9 RIGHT=10");
+  assert(Serial.reply=="NB3-DEMO-6 SERVO WATCHDOG=600 SPEED=12 FULL=90 LIMIT=NONE TRIM=24 LEFT=9 RIGHT=10");
 ''' + '\n'.join(checks) + '''
   // Every full-speed direction retains the independent disconnect timeout.
   for(char c : {'F','B','L','R','Q','E','Z','C'}){
     command('x'); nowMs=100; command(c); assert(moving);
     nowMs=701; loop(); wheels(90,90); assert(!moving);
   }
-  // Heartbeats and steering changes cannot extend the two-second full test.
+  // Full speed continues beyond two seconds while fresh commands arrive.
   command('x'); nowMs=1000; command('B'); wheels(180,0);
-  for(nowMs=1100; nowMs<3000; nowMs+=100){
+  for(nowMs=1100; nowMs<7100; nowMs+=100){
     command(nowMs % 200 ? 'B' : 'F'); assert(moving);
   }
-  loop(); wheels(90,90); assert(!moving);
-  command('B'); wheels(90,90); assert(!moving); // Queued command cannot restart.
-  command('?'); command('F'); wheels(90,90); assert(!moving);
-  command('x'); command('B'); wheels(180,0); assert(moving); // Explicit stop rearms.
+  command('B'); wheels(180,0); assert(moving);
+  nowMs+=599; loop(); wheels(180,0); assert(moving);
+  nowMs+=2; loop(); wheels(90,90); assert(!moving);
+  command('B'); wheels(180,0); assert(moving);
   command('x'); wheels(90,90); assert(!moving);
   // Calibrated packets retain the watchdog and reject malformed/range errors.
   nowMs=4000; send("@654E\\n"); wheels(101,78); assert(moving);

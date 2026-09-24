@@ -1,6 +1,6 @@
 /* NB3 demo: continuous-rotation servos, physical left D9, right D10.
    USB serial 115200. f/b/l/r/x; q/e/z/c for curves; ? identifies firmware.
-   Uppercase movement commands select full speed, limited to 2 seconds.
+   Uppercase movement commands select full speed while commands keep arriving.
    Calibrated slow motion: @ followed by two uppercase hex servo values and LF.
    Every movement requires another command within 600 ms.
    Neutral and slow speed must be checked with the wheels raised first. */
@@ -20,12 +20,8 @@ const int INNER_SPEED = 6;
 const int FULL_SPEED = 90;
 const int FULL_INNER_SPEED = 45;
 const unsigned long TIMEOUT_MS = 600;
-const unsigned long FULL_LIMIT_MS = 2000;
 unsigned long lastCommand = 0;
-unsigned long fullStarted = 0;
 bool moving = false;
-bool fullMoving = false;
-bool fullBlocked = false;
 char packet[4];
 int packetLength = -1;
 bool discarding = false;
@@ -42,7 +38,6 @@ void stopMotors() {
   rightMotor.write(RIGHT_NEUTRAL);
   digitalWrite(LED_BUILTIN, LOW);
   moving = false;
-  fullMoving = false;
 }
 
 void setup() {
@@ -61,16 +56,11 @@ void loop() {
     packetLength = -1;
     discarding = true;
   }
-  // Latch the limit until Stop so queued heartbeats cannot restart a test.
-  if (fullMoving && millis() - fullStarted >= FULL_LIMIT_MS) {
-    stopMotors();
-    fullBlocked = true;
-  }
   while (Serial.available()) {
     char command = Serial.read();
     // Stop always wins, even during an incomplete or malformed packet.
     if (command == 'x') {
-      stopMotors(); fullBlocked = false; packetLength = -1; discarding = false;
+      stopMotors(); packetLength = -1; discarding = false;
       continue;
     }
     if (command == '@') {
@@ -87,7 +77,6 @@ void loop() {
         int right = 16 * hexDigit(packet[2]) + hexDigit(packet[3]);
         if (left >= 66 && left <= 114 && right >= 66 && right <= 114) {
           leftMotor.write(left); rightMotor.write(right);
-          fullMoving = false;
           moving = left != LEFT_NEUTRAL || right != RIGHT_NEUTRAL;
           lastCommand = millis();
           digitalWrite(LED_BUILTIN, moving ? HIGH : LOW);
@@ -103,13 +92,12 @@ void loop() {
     }
     bool full = command == 'F' || command == 'B' || command == 'L' || command == 'R'
              || command == 'Q' || command == 'E' || command == 'Z' || command == 'C';
-    if (full && fullBlocked) continue;
     if (full) command += 'a' - 'A';
     int speed = full ? FULL_SPEED : SPEED;
     int inner = full ? FULL_INNER_SPEED : INNER_SPEED;
     int left = 0, right = 0;
     switch (command) {
-      case '?': Serial.println("NB3-DEMO-5 SERVO WATCHDOG=600 SPEED=12 FULL=90 LIMIT=2000 TRIM=24 LEFT=9 RIGHT=10"); continue;
+      case '?': Serial.println("NB3-DEMO-6 SERVO WATCHDOG=600 SPEED=12 FULL=90 LIMIT=NONE TRIM=24 LEFT=9 RIGHT=10"); continue;
       // Logical wheel speeds: positive is forward on either physical wheel.
       case 'f': left = speed; right = speed; break;
       case 'b': left = -speed; right = -speed; break;
@@ -123,8 +111,6 @@ void loop() {
       case 'c': left = -speed; right = -inner; break; // Backward-right
       default: stopMotors(); continue;
     }
-    if (full && !fullMoving) fullStarted = millis();
-    fullMoving = full;
     leftMotor.write(LEFT_NEUTRAL + LEFT_FORWARD_SIGN * left);
     rightMotor.write(RIGHT_NEUTRAL + RIGHT_FORWARD_SIGN * right);
     lastCommand = millis();
