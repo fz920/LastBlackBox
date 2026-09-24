@@ -75,12 +75,22 @@ class Frames(io.BufferedIOBase):
 
 
 class Controller:
+    SEARCH_TURN_SECONDS = 0.3
+    SEARCH_MAX_TURNS = 8
+    CENTER_TURN_SECONDS = 0.12
+    CENTER_MAX_TURNS = 6
+    SEARCH_MAX_SECONDS = 90
+
     def __init__(self, frames, serial_port=None, clock=time.monotonic, calibration_path=None):
         self.frames = frames
         self.serial = serial_port
         self.clock = clock
         self.lock = threading.RLock()
         self.owner = None
+        self.owner_kind = None
+        self.stop_generation = 0
+        self.turn_deadline = self.search_deadline = None
+        self.search_turns = self.center_turns = 0
         self.sequence = -1
         self.last_contact = 0.0
         self.last_move = 0.0
@@ -107,6 +117,7 @@ class Controller:
             except Exception as exc:
                 self.fault = f"Arduino disconnected: {exc}"
                 self.owner = None
+                self.owner_kind = None
                 self.command = "stop"
                 self.speed = "slow"
                 self.full_started = None
@@ -114,6 +125,7 @@ class Controller:
                 raise ValueError(self.fault) from exc
         if command == "stop":
             self.full_started = None
+            self.turn_deadline = None
         elif self.speed == "full" and self.full_started is None:
             self.full_started = self.clock()
         self.command = command
@@ -126,14 +138,20 @@ class Controller:
         self.reason = reason
         if release:
             self.owner = None
+            self.owner_kind = None
+            self.search_deadline = None
             self.speed = "slow"
 
     def tick(self):
         with self.lock:
             now = self.clock()
             _, timestamp, _, _ = self.frames.latest()
+            if self.owner_kind == 'search' and now >= self.search_deadline:
+                self._stop('Search time limit reached', release=True)
             if self.command != "stop":
-                if self.full_started is not None and now - self.full_started >= FULL_SPEED_LIMIT:
+                if self.turn_deadline is not None and now >= self.turn_deadline:
+                    self._stop('Search turn completed')
+                elif self.full_started is not None and now - self.full_started >= FULL_SPEED_LIMIT:
                     self._stop("Full-speed test finished — take control to test again", release=True)
                 elif now - self.last_move > WATCHDOG:
                     self._stop("Control timed out — take control again", release=True)
@@ -142,7 +160,7 @@ class Controller:
             if self.owner and now - self.last_contact > LEASE:
                 self._stop("Driver disconnected", release=True)
 
-    def claim(self, speed="slow"):
+    def claim(self, speed="slow", *, kind="manual"):
         with self.lock:
             self.tick()
             if self.fault:
@@ -154,6 +172,9 @@ class Controller:
             self._send("stop")
             self.speed = speed
             self.owner = secrets.token_urlsafe(24)
+            self.owner_kind = kind
+            self.search_turns = self.center_turns = 0
+            self.search_deadline = self.clock() + self.SEARCH_MAX_SECONDS if kind == 'search' else None
             self.sequence = -1
             self.last_contact = self.clock()
             self.reason = "Control granted"
@@ -164,6 +185,8 @@ class Controller:
             self.tick()
             if not self.owner or not secrets.compare_digest(str(token), self.owner):
                 raise ValueError("Take control before driving")
+            if self.owner_kind != 'manual':
+                raise ValueError('Search owns the motors. Stop it before driving.')
             if type(sequence) is not int or sequence <= self.sequence:
                 raise ValueError("Out-of-order command ignored")
             if command not in COMMANDS:
@@ -186,7 +209,47 @@ class Controller:
 
     def stop_all(self):
         with self.lock:
+            self.stop_generation += 1
             self._stop("Stopped — take control to drive again", release=True)
+
+    def search_contact(self, token):
+        """Renew only the search lease, never a movement command."""
+        with self.lock:
+            self.tick()
+            if self.owner_kind != 'search' or self.owner != token:
+                raise ValueError('Search motor control was released')
+            self.last_contact = self.clock()
+
+    def search_turn(self, token, direction='right', *, centering=False):
+        """Bounded slow turns: rightward search or shorter left/right adjustments."""
+        with self.lock:
+            self.search_contact(token)
+            if type(centering) is not bool or direction not in ('left', 'right') or (not centering and direction != 'right'):
+                raise ValueError('Invalid search turn')
+            _, timestamp, _, _ = self.frames.latest()
+            if self.clock() - timestamp > FRAME_MAX_AGE:
+                self._stop('Camera paused', release=True)
+                raise ValueError('Camera paused. Search stopped.')
+            turns = self.center_turns if centering else self.search_turns
+            limit = self.CENTER_MAX_TURNS if centering else self.SEARCH_MAX_TURNS
+            if turns >= limit or self.command != 'stop':
+                raise ValueError('Search turn limit reached or a turn is still active')
+            self.speed = 'slow'
+            if centering:
+                self.center_turns += 1
+            else:
+                self.search_turns += 1
+            duration = self.CENTER_TURN_SECONDS if centering else self.SEARCH_TURN_SECONDS
+            self.last_move = self.clock()
+            self.turn_deadline = self.clock() + duration
+            self._send(direction)
+            self.reason = ('Centring: ' if centering else 'Looking around: ') + 'short ' + direction + ' turn'
+            return duration
+
+    def release_search(self, token, reason='Search finished'):
+        with self.lock:
+            if self.owner_kind == 'search' and self.owner == token:
+                self._stop(reason, release=True)
 
     def set_calibration(self, values):
         values = validate_calibration(values)
@@ -214,6 +277,7 @@ class Controller:
             return {"mode": "robot" if self.serial else "preview",
                     "arduino": "disconnected" if self.fault else ("connected" if self.serial else "disabled"),
                     "busy": self.owner is not None, "command": self.command, "speed": self.speed,
+                    "owner_kind": self.owner_kind, "stop_generation": self.stop_generation,
                     "reason": self.reason, "fault": self.fault,
                     "calibration": dict(self.calibration),
                     "camera_live": age is not None and age <= FRAME_MAX_AGE,
@@ -251,8 +315,20 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/api/status":
             speech = getattr(self.server, "speech", None)
+            talk = getattr(self.server, "talk", None)
+            search = getattr(self.server, "search", None)
             return self.reply(200, {**self.server.controller.status(),
-                "speech": speech.status() if speech else {"enabled": False}})
+                "speech": speech.status() if speech else {"enabled": False},
+                "talk": talk.status() if talk else {"enabled": False},
+                "search": search.status() if search else {"enabled": False}})
+        if path == '/api/search/frame':
+            search = getattr(self.server, 'search', None)
+            if search:
+                with search.lock:
+                    jpeg = search.matched_jpeg
+                if jpeg:
+                    return self.reply(200, jpeg, 'image/jpeg')
+            return self.reply(404, {'error': 'No confirmed match image'})
         if path == "/api/detections":
             detector = getattr(self.server, "detector", None)
             status = detector.snapshot()[1] if detector else {"enabled": False, "live": False, "objects": [], "error": "Detection is not enabled"}
@@ -276,6 +352,8 @@ class Handler(BaseHTTPRequestHandler):
                  "/steering.js": ("steering.js", "text/javascript"),
                  "/detection.js": ("detection.js", "text/javascript"),
                  "/speech.js": ("speech.js", "text/javascript"),
+                 "/talk.js": ("talk.js", "text/javascript"),
+                 "/search.js": ("search.js", "text/javascript"),
                  "/app.js": ("app.js", "text/javascript")}
         if path not in files:
             return self.reply(404, {"error": "Not found"})
@@ -289,25 +367,63 @@ class Handler(BaseHTTPRequestHandler):
                 (origin and origin != "http://" + self.headers.get("Host", ""))):
             return self.reply(403, {"error": "Use the robot controller page"})
         try:
+            path = urlsplit(self.path).path
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 <= length <= 2048:
+            if not 0 <= length <= (4096 if path in ('/api/talk/text', '/api/search/start') else 2048):
                 raise ValueError("Request too large")
             body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("Expected a JSON object")
             path = urlsplit(self.path).path
             controller = self.server.controller
+            if path.startswith('/api/search/'):
+                search = getattr(self.server, 'search', None)
+                if not search:
+                    raise ValueError('Search is not enabled. Start the server with --realtime.')
+                action = path.removeprefix('/api/search/')
+                if action == 'start':
+                    if body.get('target') is None:
+                        raise ValueError('Enter a clue or use Hold to give a clue.')
+                    result = search.start(body.get('token'), body.get('target'), body.get('allow_turns'),
+                                          body.get('frame_time'), body.get('stop_generation'))
+                elif action == 'listen' and hasattr(search, 'finish_recording'):
+                    result = search.start(body.get('token'), None, body.get('allow_turns'),
+                                          body.get('frame_time'), body.get('stop_generation'))
+                elif action == 'finish' and hasattr(search, 'finish_recording'):
+                    result = search.finish_recording(body.get('token'))
+                elif action == 'heartbeat':
+                    result = search.heartbeat(body.get('token'), body.get('frame_time'))
+                elif action == 'cancel':
+                    # Global Stop is separate; this route cancels only the caller's search.
+                    search._validate_token(body.get('token'))
+                    result = search.cancel(body['token'])
+                else:
+                    raise ValueError('Unknown search action')
+                return self.reply(200, result)
             if path in ("/api/speech/describe", "/api/speech/stop"):
                 speech = getattr(self.server, "speech", None)
                 if not speech:
                     raise ValueError("Speech is not enabled on this server")
-                return self.reply(200, speech.describe(body.get('use_llm', False)) if path.endswith('/describe') else speech.stop())
+                return self.reply(200, speech.describe() if path.endswith('/describe') else speech.stop())
+            if path.startswith('/api/talk/'):
+                talk = getattr(self.server, 'talk', None)
+                if not talk:
+                    raise ValueError('Conversation is not enabled on this server')
+                action = path.removeprefix('/api/talk/')
+                if action == 'text':
+                    result = talk.send_text(body.get('token'), body.get('prompt'))
+                else:
+                    result = talk.start(body.get('token')) if action == 'start' else talk.command(action, body.get('token'))
+                return self.reply(200, result)
             if path == "/api/claim":
                 return self.reply(200, {"token": controller.claim(body.get("speed", "slow"))})
             if path == "/api/control":
                 controller.control(body.get("token"), body.get("sequence"), body.get("command"), body.get("frame_time"))
             elif path == "/api/stop":
                 controller.stop_all()
+                search = getattr(self.server, 'search', None)
+                if search:
+                    search.cancel()
             elif path == "/api/calibration":
                 controller.set_calibration(body)
             else:
@@ -368,14 +484,15 @@ def main():
     parser.add_argument("--detection-model", type=Path, default=ROOT.parents[3] / "_tmp/coral/models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite")
     parser.add_argument("--detection-labels", type=Path, default=ROOT.parents[3] / "_tmp/coral/models/coco_labels.txt")
     parser.add_argument("--speech", action="store_true", help="Enable spoken descriptions through the NB3 mouth")
-    parser.add_argument("--llm", action="store_true", help="Enable on-demand local LLM descriptions (requires --speech)")
+    parser.add_argument("--realtime", action="store_true", help="Enable OpenAI push-to-talk through the robot ears and mouth")
+    parser.add_argument("--openai-key-file", type=Path, default=Path.home() / '.config/nb3/openai-api-key')
+    parser.add_argument("--realtime-model", default="gpt-realtime")
+    parser.add_argument("--search-model", default="gpt-4.1-mini", help="Vision model for look-around searches")
     parser.add_argument("--speech-engine", type=Path, default=ROOT.parents[3] / "_tmp/speech/bin/espeak-ng")
     parser.add_argument("--speech-device", default="auto", help="ALSA output device; auto selects the NB3/MAX98357A mouth")
     args = parser.parse_args()
     if args.speech and not args.detect:
         parser.error("--speech requires --detect")
-    if args.llm and not args.speech:
-        parser.error("--llm requires --speech")
     frames = Frames()
     port = connect_arduino(args.serial) if args.serial else None
     controller = Controller(frames, port, calibration_path=args.calibration_file)
@@ -383,6 +500,9 @@ def main():
     server = None
     detector = None
     speech = None
+    talk = None
+    search = None
+    audio_lock = threading.Lock()
     finished = threading.Event()
     try:
         if not args.no_camera:
@@ -403,16 +523,27 @@ def main():
         server.detector = detector
         if args.speech:
             from speech import Speech
-            llm = None
-            if args.llm:
-                from llm import LocalLLM
-                llm = LocalLLM(ROOT.parents[3] / '_tmp/llm')
-            speech = Speech(detector, args.speech_engine, args.speech_device, llm=llm)
+            speech = Speech(detector, args.speech_engine, args.speech_device, audio_lock=audio_lock)
         server.speech = speech
+        if args.realtime:
+            from talk import Talk
+            talk = Talk(frames, audio_lock, args.openai_key_file, args.realtime_model, args.speech_device)
+        server.talk = talk
+        if talk:
+            from hunt import Hunt
+            from search_vision import SearchVision
+            search = Hunt(controller, talk._key, speech, SearchVision(args.search_model),
+                          audio_lock=audio_lock, device=args.speech_device, model=args.realtime_model,
+                          mirrored=args.flip in ('horizontal', 'both'))
+        server.search = search
 
         def watchdog():
             while not finished.wait(0.05):
                 controller.tick()
+                if search:
+                    search.tick()
+                if talk:
+                    talk.tick()
 
         threading.Thread(target=watchdog, daemon=True).start()
 
@@ -429,6 +560,10 @@ def main():
     finally:
         finished.set()
         controller.stop_all()
+        if search:
+            search.close()
+        if talk:
+            talk.close()
         if speech:
             speech.close()
         if detector:

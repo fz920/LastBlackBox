@@ -14,6 +14,7 @@ class Element {
   }
   addEventListener(name, handler) { this.listeners[name] = handler; }
   setPointerCapture() {}
+  setAttribute() {}
   getContext() { return {clearRect() {}, strokeRect() {}, fillRect() {}, fillText() {}, measureText() { return {width: 20}; }}; }
 }
 
@@ -53,7 +54,7 @@ async function main() {
       return {ok: true, json: async () => reply};
     },
   });
-  for (const filename of ["steering.js", "detection.js", "speech.js", "app.js"])
+  for (const filename of ["steering.js", "detection.js", "speech.js", "talk.js", "search.js", "app.js"])
     vm.runInContext(fs.readFileSync(`${__dirname}/site/${filename}`, "utf8"), context);
   const settle = () => new Promise(resolve => setImmediate(resolve));
   await settle();
@@ -68,6 +69,23 @@ async function main() {
   assert.equal(element("speed").disabled, true);
   assert.equal(element("calibration-fields").disabled, true);
   assert.match(element("mode").textContent, /FULL SPEED/);
+  assert.equal(status.command, "stop");
+  // Typing spaces or WASD in the question box must neither stop nor drive.
+  const beforeTyping = requests.length;
+  for (const key of [" ", "w", "ArrowUp"]) {
+    let prevented = false;
+    window.listeners.keydown({key, target:{tagName:"TEXTAREA"}, preventDefault() {prevented = true;}});
+    assert.equal(prevented, false);
+  }
+  await settle();
+  assert.equal(requests.length, beforeTyping);
+  for (const key of ["ArrowUp", "ArrowDown", "w"]) {
+    let prevented = false;
+    window.listeners.keydown({key, target:{tagName:"DIV", closest:() => ({})}, preventDefault() {prevented = true;}});
+    assert.equal(prevented, false);
+  }
+  await settle();
+  assert.equal(requests.length, beforeTyping);
   assert.equal(status.command, "stop");
   buttons[0].listeners.pointerdown({button: 0, pointerId: 1, preventDefault() {}});
   await settle();

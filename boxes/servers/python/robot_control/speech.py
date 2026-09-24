@@ -1,4 +1,4 @@
-"""Speak fresh Coral labels locally, with one cancellable utterance at a time."""
+"""Local descriptions and cloud search announcements share one cancellable player."""
 from collections import Counter
 import os
 from pathlib import Path
@@ -6,7 +6,8 @@ import re
 import shutil
 import subprocess
 import threading
-import time
+
+from cloud_speech import CloudSpeech
 
 
 def object_phrases(objects):
@@ -52,18 +53,17 @@ def mouth_device(cards_path='/proc/asound/cards'):
 
 
 class Speech:
-    def __init__(self, detector, engine, device='auto', llm=None):
+    def __init__(self, detector, engine, device='auto', audio_lock=None):
         self.detector, self.engine, self.device = detector, str(engine), device
-        self.llm = llm
+        self.audio_lock = audio_lock or threading.Lock()
         self.phase = 'idle'
-        self.source = self.detail = ''
-        self.generation_seconds = None
         self.lock = threading.RLock()
         self.busy = False
         self.text = self.error = ''
         self.process = self.thread = None
         self.cancel = threading.Event()
         self.closed = False
+        self.cloud = CloudSpeech()
 
     def _configuration(self):
         if not os.access(self.engine, os.X_OK):
@@ -80,15 +80,11 @@ class Speech:
             _, config_error = self._configuration()
             return {'enabled': True, 'ready': not config_error and not self.closed,
                     'speaking': self.busy, 'text': self.text,
-                    'llm_enabled': self.llm is not None, 'phase': self.phase,
-                    'source': self.source, 'detail': self.detail,
-                    'generation_seconds': self.generation_seconds,
+                    'phase': self.phase,
                     'error': config_error or self.error}
 
-    def describe(self, use_llm=False):
+    def describe(self):
         with self.lock:
-            if type(use_llm) is not bool:
-                raise ValueError('Choose whether to use the local LLM')
             if self.closed:
                 raise ValueError('Speech is shutting down')
             if self.busy:
@@ -99,56 +95,47 @@ class Speech:
             result, _ = self.detector.snapshot() if self.detector else (None, None)
             if result is None:
                 raise ValueError('Wait for fresh Coral detections before describing the scene.')
-            self.text = describe_objects(result['objects'])
-            self.source = 'basic'
-            self.detail = ''
-            self.generation_seconds = None
+            return self._begin(describe_objects(result['objects']), device)
+
+    def say(self, text, *, api_key=None):
+        """Speak a short result, using OpenAI when an API key is supplied."""
+        with self.lock:
+            if self.closed or self.busy:
+                raise ValueError('Speech is unavailable or already busy.')
+            if not isinstance(text, str) or not 1 <= len(text) <= 400:
+                raise ValueError('Speech result must be a short sentence.')
+            device, error = self._configuration()
+            if error:
+                raise ValueError(error)
+            return self._begin(text, device, api_key)
+
+    def _begin(self, text, device, api_key=None):
+        with self.lock:
+            if not self.audio_lock.acquire(blocking=False):
+                raise ValueError('Conversation is using the audio device. End it first.')
+            self.text = text
             self.phase = 'preparing'
-            if use_llm and self.llm:
-                self.text = ''
             self.error = ''
             self.cancel = threading.Event()
             self.busy = True
             self.thread = threading.Thread(target=self._describe_and_speak,
-                args=(result['objects'], device, self.cancel, use_llm), name='robot-speech', daemon=True)
+                args=(self.text, device, self.cancel, api_key), name='robot-speech', daemon=True)
             self.thread.start()
             return self.status()
 
-    def _progress(self, phase):
-        with self.lock:
-            self.phase = phase
-
-    def _describe_and_speak(self, objects, device, cancel, use_llm):
+    def _describe_and_speak(self, text, device, cancel, api_key=None):
         try:
-            text = describe_objects(objects)
-            source, detail = 'basic', ''
-            parts = object_phrases(objects)
-            if use_llm and self.llm and parts:
-                started = time.monotonic()
-                try:
-                    text = self.llm.generate(parts, cancel, self._progress)
-                    source = 'llm'
-                except Exception as exc:
-                    if cancel.is_set():
-                        return
-                    source, detail = 'fallback', str(exc)
+            if api_key is not None:
+                pcm = self.cloud.synthesize(api_key, text, cancel)
+                if not cancel.is_set():
+                    with self.lock:
+                        self.phase = 'speaking'
+                    self._command(['aplay', '-q', '-D', device, '-t', 'raw',
+                                   '-f', 'S16_LE', '-r', '24000', '-c', '1'], pcm, 22, cancel)
+            else:
                 with self.lock:
-                    self.generation_seconds = round(time.monotonic() - started, 1)
-                # Generation takes seconds. Recheck the scene before speaking.
-                fresh, _ = self.detector.snapshot()
-                if fresh is None:
-                    raise ValueError('Video or detections paused. Request a new description when live.')
-                if sorted(object_phrases(fresh['objects'])) != sorted(parts):
-                    text = describe_objects(fresh['objects'])
-                    source, detail = 'fallback', 'Scene changed while the model was thinking.'
-            elif use_llm:
-                source, detail = 'fallback', ('No objects detected confidently.' if not parts else 'Local LLM is not enabled.')
-            if cancel.is_set():
-                return
-            with self.lock:
-                self.text, self.source, self.detail = text, source, detail
-                self.phase = 'speaking'
-            self._speak(text, device, cancel)
+                    self.phase = 'speaking'
+                self._speak(text, device, cancel)
         except Exception as exc:
             if not cancel.is_set():
                 with self.lock:
@@ -157,6 +144,7 @@ class Speech:
             with self.lock:
                 self.busy = False
                 self.phase = 'cancelled' if cancel.is_set() else 'idle'
+                self.audio_lock.release()
 
     def _command(self, command, data, timeout, cancel):
         with self.lock:
@@ -192,13 +180,12 @@ class Speech:
     def stop(self):
         with self.lock:
             self.cancel.set()
+            self.cloud.close()
             if self.process and self.process.poll() is None:
                 try:
                     self.process.terminate()
                 except ProcessLookupError:
                     pass
-        if self.llm:
-            self.llm.close()
         return self.status()
 
     def close(self):

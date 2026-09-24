@@ -2,14 +2,27 @@
 
 A local website with camera video, hold-to-drive buttons, arrow/WASD keys, and
 Space/Escape to stop. One browser can drive at a time; other browsers can watch
-and press Stop. No cloud service, frontend build step, or internet is required.
+and press Stop. Driving, Coral detection and basic speech work offline. Optional
+push-to-talk conversation uses OpenAI Realtime over the internet.
+
+The page places live video beside the conversation on laptops and tablets, with
+the latest reply above the question box. Long replies scroll inside their own
+panel. Phones use a compact camera preview that stays visible as you scroll.
+STOP stays in the fixed top bar; manual driving sits below the video/conversation,
+and offline descriptions and conversation help are expandable. Offline speech
+also displays its result in the reply panel. Focus that panel to scroll long
+replies with arrow keys without sending driving commands.
 
 ## Start with motor output disabled
 
-On the Pi, from the repository root:
+On the Pi, from the repository root, use `/usr/bin/python3` explicitly. The
+website needs the system-installed Picamera2 and pyserial packages. This also
+works when the `LBB` virtual environment is active; that environment has an
+unrelated package named `serial` and does not include the camera dependencies.
+
 
 ```bash
-python3 boxes/servers/python/robot_control/server.py
+/usr/bin/python3 boxes/servers/python/robot_control/server.py
 ```
 
 Open **http://192.168.1.203:8000** on a phone or laptop on the same Wi-Fi.
@@ -28,9 +41,9 @@ bash boxes/servers/python/robot_control/setup-detection.sh
 Start the website with detection enabled:
 
 ```bash
-python3 boxes/servers/python/robot_control/server.py --detect
+/usr/bin/python3 boxes/servers/python/robot_control/server.py --detect
 # Include the existing Arduino controls:
-python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect
+/usr/bin/python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect
 ```
 
 Run only one server at a time. Refresh the website and leave **Show detections**
@@ -116,7 +129,7 @@ utterance is allowed at a time; repeated clicks do not build a queue.
 
 The service uses offline eSpeak NG (British English, 155 words/minute, amplitude
 65) and ALSA `aplay`, with bounded subprocess timeouts and a cancellable background
-thread. Basic mode needs no LLM. Neither mode needs an API key, cloud connection,
+thread. This basic description needs no API key, cloud connection,
 microphone recording, or saved audio files. Voice generation and playback are independent of camera,
 NPU, and motor watchdogs. The transcript is retained in memory until replaced or
 the server restarts.
@@ -133,52 +146,250 @@ through ALSA without errors while camera and detection stayed live and motors
 remained stopped. The user confirmed hearing it clearly from the mouth.
 Chromium checks passed for describe/stop, transcript, and desktop/mobile layouts.
 
-## Local LLM descriptions
+## Voice and text conversation (OpenAI)
 
-The website can use the installed [Qwen model](../../../intelligence/LLMs/local-NB3/README.md)
-to phrase its spoken descriptions. Start the server with:
+The local Qwen model and llama.cpp runtime have been removed from this Pi to
+recover storage. The website now offers cloud conversation alongside offline
+Coral descriptions. No local language model is required.
+
+Install the small WebSocket dependency once, from the repository root:
 
 ```bash
-python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect --speech --llm
+bash boxes/servers/python/robot_control/setup-realtime.sh
 ```
 
-For the background service, append `--llm` to the `systemd-run` command above.
-Refresh the page, leave **Use local LLM** checked, and press **Describe what I see**.
-The website shows loading/thinking progress, the resulting text, and whether it
-came from the LLM or a basic fallback. **Cancel description** stops model loading
-or generation; the same button becomes **Stop speaking** during audio playback.
-Uncheck **Use local LLM** for the faster basic description.
+Start the website with the new mode:
 
-This reuses the existing model and runtime: no additional model downloads or
-copies. The model process starts only for a description, uses two CPU threads,
-and exits before audio playback, releasing its memory. Requests are private to
-the website process through a temporary Unix socket; there is no extra network
-listener. Loading is limited to 45 seconds and generation to 30 seconds. A
-two-category test took 13.3 seconds, and a live website/browser test took 27.2
-seconds on this Pi. First use or a busy Pi may take longer.
+```bash
+/usr/bin/python3 -B boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect --speech --realtime
+```
 
-Because unrestricted Qwen answers failed the earlier factuality checks, this
-integration limits what it can generate. Application code forms the correct
-count/name phrases for up to three detected categories. The LLM chooses their
-ordering and introductory wording under a grammar that preserves all those
-phrases. A separate validator rejects output outside the permitted sentences,
-including truncation, incorrect counts, or invented attributes. This provides
-limited wording variation, not unrestricted scene understanding. It cannot add
-activities, colours, identities, or distances, and never commands movement.
-The detector itself can still misidentify or miss objects.
+For a background process (stop any existing server first):
 
-If the model is unavailable, times out, or produces invalid output, the existing
-basic description is used and the website explains the fallback. Empty detections
-skip the model. After generation the current detections are checked again: if
-the selected object counts changed, a fresh basic description replaces the old
-answer; if detection is stale, nothing is spoken. Stop/cancel prevents later
-playback, including when pressed during loading.
+```bash
+systemd-run --user --unit=nb3-robot-control --collect \
+  --property=WorkingDirectory="$PWD" -- \
+  /usr/bin/python3 -B "$PWD/boxes/servers/python/robot_control/server.py" \
+  --serial /dev/ttyUSB0 --detect --speech --realtime
+```
 
-Tests in `test_llm.py` cover the permitted vocabulary, exact counts, rejecting
-invented/truncated answers, process cleanup, cancellation, timeouts, opt-out,
-empty scenes, and scene changes. All 51 Python tests passed. Live Chromium checks
-passed for LLM description/playback, cancel, opt-out, and desktop/mobile layouts,
-with the camera live and no motor commands sent.
+Stop it with `systemctl --user stop nb3-robot-control`. This transient service
+must be started again after reboot. Leave off `--serial` for motor-disabled preview.
+
+### Add your API key later
+
+Without a key, the website shows **API key not configured yet** and disables
+**Hold to talk** and **Send question**. No microphone or API connection starts. Keep your key out of
+chat, browser code, Git and command history. On the Pi, run this in a Bash terminal:
+
+```bash
+install -d -m 700 ~/.config/nb3
+( umask 077
+  read -rsp 'OpenAI API key: ' nb3_api_key
+  printf '\n'
+  printf '%s' "$nb3_api_key" > ~/.config/nb3/openai-api-key
+  unset nb3_api_key
+)
+```
+
+The prompt hides your input. The key file is outside the repository and readable
+only by your account. The server checks it automatically; refresh the website,
+with no server restart needed. `OPENAI_API_KEY` in the server's environment is
+also supported and takes precedence. API billing/model access must be enabled
+in your OpenAI account; a ChatGPT subscription does not pay for API usage.
+
+### Use it
+
+For a typed question, use **Type a question**, then click **Send question** or
+press **Enter**. **Shift+Enter** inserts a new line. Questions can contain up to
+500 characters. Your text and one fresh camera image go to OpenAI, and its
+reply plays through the robot's mouth with a transcript below. The microphone
+is never opened for typed questions. Text and voice share the same short-lived
+conversation context, so you can alternate between them for follow-ups.
+Ordinary spaces and WASD/arrow keys work normally while editing the text box;
+Escape and the on-screen Stop button retain their Stop function.
+
+For a spoken question:
+
+1. Speak **near the robot**, not your laptop. Hold **Hold to talk**, ask a question
+   such as “What can you see?”, then release. With a keyboard, focus the button
+   and hold **Enter**. Space/Escape retain their Stop function.
+2. On release, the Pi sends your recorded question and one fresh 640×480 camera
+   snapshot to OpenAI. The answer streams through the robot's mouth and its
+   transcript appears on the page. This is snapshots plus speech, not continuous video.
+3. Wait for the reply to finish, then hold again for a follow-up. **End conversation**
+   interrupts recording/playback and clears the API session. To interrupt a reply
+   and ask something new, end it first and wait for the button to become available.
+
+Recordings are limited to 15 seconds; exceeding that limit discards the question.
+Changing tabs, losing window focus, or closing the page cancels the turn. The Pi
+also cancels after 2.5 seconds without browser heartbeats. No sound is captured
+between questions, so the speaker cannot feed its answer into the next recording.
+Basic offline descriptions and conversation share exclusive access to audio.
+The microphone uses ALSA PCM16 mono at 24 kHz; ALSA converts from the NB3 hardware
+format. The cloud reply uses the same format, streamed directly into `aplay`.
+
+The API key is read only on the server. Audio and JPEGs are held in RAM, with no
+local recording files. Explicitly submitted questions and snapshots are sent to
+OpenAI and are subject to its [API data controls](https://developers.openai.com/api/docs/guides/your-data).
+Conversation context remains in the API session for up to six turns, then starts
+fresh; it also resets after two minutes of inactivity or any cancellation/error.
+The last answer text remains on the website until the next question or restart.
+Conversation uploads go directly from the Pi to OpenAI; the browser supplies
+controls and displays the local camera preview and reply text. Costs include
+input audio, images, replies and retained conversation context. Only submitted
+questions request model responses; idle preview/detection makes no API calls.
+
+The default model is `gpt-realtime`, with the `marin` voice, no automatic turn
+detection, a 384-token response cap and a 30-second output-audio limit. Select a
+compatible Realtime model with `--realtime-model`. The API receives no hardware
+tools and cannot command the wheels. The browser's manual driving controls and
+motor watchdogs are independent of conversation.
+
+Implementation follows OpenAI's
+[Realtime conversations and push-to-talk guide](https://developers.openai.com/api/docs/guides/realtime-conversations)
+and [server WebSocket guide](https://developers.openai.com/api/docs/guides/realtime-websocket).
+`test_talk.py` uses fake WebSocket events and local subprocesses to check protocol,
+streaming, exclusive audio, cancellation, limits, stale images, key handling and
+HTTP protection. `test_talk_ui.js` checks button ordering and cancellation. The API key stays on the Pi for both text and voice requests.
+
+Setup checks on this Pi: the Python regression suite and all five JavaScript
+suites pass. A local hardware test captured nonzero 24 kHz audio from the ears
+and streamed a synthesized test reply through the mouth without any cloud call.
+Desktop/mobile Chromium rendering and mocked hold/release/follow-up/cancel flows
+passed with no JavaScript errors. Chromium network navigation stalled in this
+environment, so those rendering checks loaded the actual page sources directly;
+the running website's HTTP status, live camera and stopped Arduino were checked
+separately.
+
+After configuring the key, one live test through `/api/talk/text` sent a short
+question and a fresh camera image to `gpt-realtime`. The robot began playback
+at about 2.5 seconds and finished at 6.1 seconds, with a completed response and
+no playback errors. The reply was “I can see a stack of chairs in the room.”
+The robot's wheels remained stopped. This verifies key/model access, image +
+text input, API speech streaming and speaker playback; natural spoken-question
+recognition still needs a user speaking near the robot. Latency varies with the
+network and response length. The text-input update passes 66 Python tests,
+including validation, no microphone capture, shared voice/text context and
+protected HTTP handling.
+
+## Look around: spoken and typed clues
+
+With `--realtime`, the **Look around** tab is available beside **Conversation**.
+It uses the saved API key: Realtime interprets a spoken or typed clue, then a
+separate image-check model (`gpt-4.1-mini` by default; override with
+`--search-model`) checks the camera. The interpreter uses `--realtime-model`
+(`gpt-realtime` by default). No extra packages or model downloads are needed.
+Start or restart the website in your terminal from the repository root:
+
+```bash
+/usr/bin/python3 -B boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect --speech --realtime
+```
+
+1. Put the robot on a clear, level area with room to turn. For an initial wheel
+   direction check, lift the wheels; a useful visual search needs the body to rotate.
+2. Release manual control with **STOP**, then select **Look around**.
+3. Check **Allow short turns to find and centre**, then either type a clue and
+   select **Find from text**, or hold **Hold to give a clue**, speak near the
+   robot's ears and release. Typed clues can be up to 500 characters; recordings
+   must be shorter than 15 seconds. You can also hold Enter while the voice button
+   is focused. The checkbox resets after starting/cancelling each search.
+4. Try **Find a blue water bottle** or **Find something red I could drink from**.
+   The wheels stay stopped while the API interprets the clue. The page shows
+   the understood request and search criteria, then searching starts automatically.
+   An ambiguous clue prompts a spoken/on-screen question without moving. Re-enable
+   turns and give a new, complete clue to answer it; search clues have no chat history.
+5. The robot inspects a stationary image. If it cannot confirm the target, it
+   turns right at calibrated slow speed for 0.3 seconds, stops, waits for the
+   camera to settle, and checks a new image.
+6. A possible match needs a second, newer stationary image to agree. The robot
+   then turns left or right in **0.12-second slow steps**, stopping and settling
+   before each new image. It aims to put the object's horizontal midpoint within
+   the **middle third** of the camera view.
+7. Two consecutive stationary images must agree that the target is near the
+   centre. The robot stops, displays the final **matched snapshot**, and announces
+   the find in one sentence using OpenAI's Marin voice. Check the picture yourself:
+   two model checks can still make the same mistake.
+
+The result panel reports whether centring was confirmed or stopped at a limit.
+If the target becomes absent or uncertain, centring ends immediately without
+resuming the search. An unclear position (including ambiguous multiple matches)
+also prevents further turns. A still-visible object at a limit is reported as
+found, with an explicit note that centring was not confirmed. A lost target is
+not announced as a current find. Describe a distinctive, stationary object for
+best results; this is approximate visual alignment, not precise tracking.
+The server accounts for `--flip horizontal` / `--flip both` when choosing a
+centring direction; the webpage's vertical flip does not change steering.
+
+Successful matches use one extra text-to-speech call (`gpt-4o-mini-tts`, Marin),
+with the same API key. The sentence includes the target, image position and a
+brief detail from the final confirmed view; for example, “I think I
+found a red cup, on the right — a red ceramic cup sits on the desk.” The exact
+sentence appears in the result panel. This is an AI-generated voice. Motors
+stop before speech generation begins. Audio stays in RAM (at most 20 seconds,
+under 1 MB); no downloads, recordings or extra packages are stored on the Pi.
+Clarification questions use the same voice. STOP cancels generation/playback.
+If audio is already in use the announcement
+is skipped; if the speech API fails, the result remains visible with a voice
+error. Unsuccessful searches and offline Coral descriptions retain local speech.
+The implementation follows the official [OpenAI speech guide](https://developers.openai.com/api/docs/guides/text-to-speech).
+
+The application permits at most **8 search turns plus 6 centring turns**, with
+**20 image checks and 90 seconds shared across the whole operation**, including
+recording and clue interpretation. A turn
+resets the consecutive-centred-image count; reaching a limit always stops movement. There is no full-circle or degree guarantee because this
+robot does not measure wheel rotation. Its position may drift as it turns. It
+never approaches the object or drives forward/backward as part of a search, and
+it has no obstacle avoidance. If unsuccessful, it reports that it could not
+confirm the object **from here**, rather than claiming the object is absent.
+
+**STOP** or **Stop search** immediately releases the search's motor control.
+Switching back to Conversation, changing browser tabs, losing focus, losing live
+video, or disconnecting also cancels it. A browser heartbeat must arrive within
+1.5 seconds; motor ownership additionally uses the existing controller lease.
+Each turn has its own Pi-enforced deadline, and the existing independent Arduino
+600 ms command timeout still applies if the Pi stops responding. Search owns the
+motors exclusively, so manual driving and calibration cannot compete with it.
+A late API response cannot resume cancelled motion or stop a newly claimed driver.
+The program reads a new image only after stopping and settling. The clue interpreter
+supplies validated search criteria or a clarification question; the vision model
+supplies a match assessment, image position and description. Local code maps left/right
+positions to fixed slow centring steps; the model cannot supply motor commands,
+speeds, durations, or turn limits.
+
+The typed clue or released microphone recording goes to OpenAI in a separate,
+short-lived Realtime session. Recording uses the robot's microphones, not your
+browser microphone, and shares the audio lock with Conversation and speech.
+Stop active speech/conversation before recording a clue. Cancelled recordings
+are not submitted; audio is capped at 720 KB and stays in RAM.
+Each search makes one clue-interpretation request before any image checks.
+
+The interpreted description and each checked JPEG go directly to OpenAI through the Responses
+API with `store: false`, structured output, and a 300-token output cap. That setting
+does not override OpenAI's API data-retention policies. Search keeps only the
+matched JPEG and small status fields after completion; no search photos or audio
+are written to disk. Clue interpretation, image checks and cloud speech incur API
+usage. Cancelling stops the robot immediately, but an already submitted request may still
+incur a charge. Refusals, malformed output, API failures and timeouts stop the
+search. API/model access errors are shown without exposing the key.
+
+Leave off `--serial` for preview mode: search turns are simulated, so the camera
+will keep facing the same physical direction. Normal chat remains conversational;
+use the dedicated Look around tab to explicitly authorize a physical search.
+
+The implementation follows the official [vision input guide](https://developers.openai.com/api/docs/guides/images-vision)
+and [structured output guide](https://developers.openai.com/api/docs/guides/structured-outputs).
+`test_search.py` exercises bounded turns, the two-image match check, fresh frames,
+API errors, STOP races, disconnects, exclusive ownership and HTTP protection using
+simulated serial hardware. `test_search_ui.js` checks explicit enable, stale video,
+manual-control conflicts, cancel ordering, hold/release ordering and matched-image
+display. `test_hunt.py` exercises typed/audio clue handoff, clarification without
+motion, microphone cleanup/limits and cancellation during interpretation.
+Real API checks interpreted a typed functional clue and a synthetic spoken object
+request successfully, without opening the microphone, speaker or motor connection.
+Chromium checks with simulated requests passed for search controls, matched-image
+display and five desktop/phone viewport sizes (320–1440 pixels wide).
+Physical turn coverage and search accuracy still need supervised testing on this robot.
 
 ## Preview controls
 
@@ -325,7 +536,7 @@ for both commands. Stop anything using the serial port before uploading.
 Stop the preview server with Ctrl+C, then run:
 
 ```bash
-python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0
+/usr/bin/python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0
 ```
 
 The server sends only Stop and an identification request during startup. It
@@ -376,8 +587,9 @@ python3 -B -m unittest -v
 
 Tests cover command ordering, driver exclusivity, frame freshness, Pi timeouts,
 serial failure, preview mode, and HTTP routes. Use `--no-camera` to inspect the
-unavailable-camera UI. Python's standard library handles HTTP; the only hardware
-packages needed are the Pi's `picamera2` and `pyserial`.
+unavailable-camera UI. Python's standard library handles HTTP; the hardware
+packages are the Pi's `picamera2` and `pyserial`. Realtime adds only
+`websocket-client` in the ignored runtime directory.
 
 The Python suite also compiles the actual Arduino sketch against simulated servos
 when `g++` is available, checking all curved wheel outputs and their stop timeouts.

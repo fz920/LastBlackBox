@@ -6,6 +6,10 @@ let state = null, lastVideo = 0, frameTime = 0, frameNumber = 0, objectURL = nul
 const steering = new SteeringInput();
 const detectionOverlay = new DetectionOverlay($("detections"), $("detection-status"), $("detection-summary"));
 const speechControls = new SpeechControls($, api);
+const talkControls = new TalkControls($, api);
+const searchControls = new SearchControls($, api,
+  () => ({fresh:fresh(), frameTime, driving:Boolean(state?.busy), stopGeneration:state?.stop_generation}),
+  () => emergencyStop("Search stopped."));
 let videoRequestMode = null;
 let controlBusy = false;
 const calibrationKeys = ["left_forward", "right_forward", "left_backward", "right_backward"];
@@ -22,7 +26,9 @@ async function api(path, body, keepalive = false) {
 }
 
 function render() {
-  speechControls.render(state?.speech, online);
+  talkControls.render(undefined, online);
+  searchControls.render(undefined, online);
+  speechControls.render(undefined, online, talkControls.state?.busy);
   detectionOverlay.render($("show-detections").checked, fresh(), $("camera").classList.contains("flipped"));
   $("connection").textContent = online ? "Robot connected" : "Disconnected";
   $("connection").className = `badge ${online ? "good" : "bad"}`;
@@ -32,7 +38,7 @@ function render() {
   $("video-message").textContent = online ? (state?.camera_error || "Waiting for fresh video…") : "Connection lost. Movement has stopped.";
   $("camera").parentElement.classList.toggle("stale", !fresh());
   $("claim").disabled = !online || claiming || calibrationSaving || calibrationDirty || Boolean(state?.fault) || (!token && (state?.busy || !fresh()));
-  $("claim").textContent = token ? "Release control" : (state?.busy ? "Another driver has control" : "Take control");
+  $("claim").textContent = token ? "Release control" : (state?.busy ? (state.owner_kind === "search" ? "Search has control" : "Another driver has control") : "Take control");
   $("claim").classList.toggle("owned", Boolean(token));
   $("speed").disabled = !online || claiming || Boolean(token) || Boolean(state?.busy);
   $("calibration-fields").disabled = !online || claiming || calibrationSaving || Boolean(token) || Boolean(state?.busy);
@@ -93,6 +99,8 @@ function updateDirection() {
 }
 
 async function emergencyStop(message = "Stopped. Take control when you’re ready.") {
+  talkControls.cancel();
+  searchControls.cancel();
   token = null;
   clearInput();
   $("notice").textContent = message;
@@ -160,13 +168,14 @@ for (const button of directions) {
 
 window.addEventListener("keydown", event => {
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-  if (key === " " || key === "Escape") {
+  const editing = ["SELECT", "INPUT", "TEXTAREA"].includes(event.target?.tagName) || event.target?.isContentEditable;
+  if ((key === " " && !editing) || key === "Escape") {
     event.preventDefault();
     if (!event.repeat) emergencyStop();
     return;
   }
   if (!SteeringInput.keys[key] || event.ctrlKey || event.metaKey || event.altKey) return;
-  if (["SELECT", "INPUT", "TEXTAREA"].includes(event.target?.tagName)) return;
+  if (editing || event.target?.closest?.(".reply-area")) return;
   event.preventDefault();
   if (event.repeat || !online || !token || !fresh()) return;
   steering.keys.add(key);
@@ -187,20 +196,23 @@ $("show-detections").addEventListener("change", () => {
   detectionOverlay.update("starting", null);
   render();
 });
-window.addEventListener("blur", () => {if (token) emergencyStop("Window lost focus. Take control to continue.");});
-document.addEventListener("visibilitychange", () => {if (document.hidden && token) emergencyStop("Control released while away.");});
-window.addEventListener("pagehide", () => {if (token) emergencyStop();});
+window.addEventListener("blur", () => {talkControls.cancel(); searchControls.cancel(); if (token) emergencyStop("Window lost focus. Take control to continue.");});
+document.addEventListener("visibilitychange", () => {if (document.hidden) {talkControls.cancel(); searchControls.cancel();} if (document.hidden && token) emergencyStop("Control released while away.");});
+window.addEventListener("pagehide", () => {talkControls.cancel(); searchControls.cancel(); if (token) emergencyStop();});
 
 async function statusLoop() {
   try {
     state = await api("/api/status");
     online = true;
+    talkControls.render(state.talk, online);
+    searchControls.render(state.search, online);
+    speechControls.render(state.speech, online, state.talk?.busy);
     if (token && (!state.busy || state.fault)) {
       token = null;
       clearInput();
       $("notice").textContent = state.reason;
     }
-    if (!token && !claiming) $("notice").textContent = state.fault || (state.busy ? "You can watch, or press Stop at any time." : "Take control to try the direction buttons.");
+    if (!token && !claiming) $("notice").textContent = state.fault || (state.busy ? (state.owner_kind === "search" ? "Robot is looking around. STOP cancels the search." : "You can watch, or press Stop at any time.") : "Take control to try the direction buttons.");
   } catch (_) {
     online = false;
     if (token) emergencyStop("Connection lost. Reconnect and take control again.");

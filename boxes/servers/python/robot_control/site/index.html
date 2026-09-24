@@ -8,13 +8,16 @@
   <script src="/steering.js" defer></script>
   <script src="/detection.js" defer></script>
   <script src="/speech.js" defer></script>
+  <script src="/talk.js" defer></script>
+  <script src="/search.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
   <main>
-    <header>
-      <div class="brand"><span class="logo" aria-hidden="true">n<span>b</span>3</span><div><p class="eyebrow">THE LAST BLACK BOX</p><h1>Robot control</h1></div></div>
-      <span id="connection" class="badge">Connecting…</span>
+    <header class="topbar">
+      <div class="brand"><span class="logo" aria-hidden="true">n<span>b</span>3</span><div><h1>Robot control</h1><span id="connection" class="badge">Connecting…</span></div></div>
+      <span class="topbar-hint">See, ask, explore.</span>
+      <button id="stop" class="stop"><span aria-hidden="true">■</span> STOP <kbd>SPACE</kbd></button>
     </header>
     <div class="workspace">
       <section class="camera-panel" aria-label="Robot camera">
@@ -26,63 +29,116 @@
           <div id="video-message" role="status">Connecting to the camera…</div>
           <span class="camera-label">NB3 / FRONT CAMERA</span>
         </div>
-        <div class="camera-footer"><span>640 × 480 <span class="muted">/ Live preview</span></span><button id="flip" class="text-button">Flip vertically</button></div>
-        <div class="detection-panel">
-          <div class="detection-heading"><label><input id="show-detections" type="checkbox" checked> Show detections</label><span id="detection-status" class="badge">Starting detection…</span></div>
-          <p id="detection-summary">Waiting for object detection.</p>
-          <p class="detection-help">Recognises common objects. Boxes show predictions, which may be incorrect or miss objects.</p>
+        <div class="camera-footer">
+          <label class="detection-toggle"><input id="show-detections" type="checkbox" checked> Detections</label>
+          <span id="detection-status" class="badge">Starting detection…</span>
+          <button id="flip" class="text-button">Flip vertically</button>
+        </div>
+        <p id="detection-summary">Waiting for object detection.</p>
+      </section>
+      <section class="talk-panel" aria-label="Robot conversation">
+        <div class="panel-heading"><h2>Robot interaction</h2><div class="interaction-tabs" role="group" aria-label="Interaction mode"><button id="conversation-tab" type="button" aria-pressed="true">Conversation</button><button id="search-tab" type="button" aria-pressed="false">Look around</button></div></div>
+        <div class="reply-area" tabindex="0" role="region" aria-label="Robot replies">
+          <p class="eyebrow">ROBOT RESPONSE</p>
+          <p id="talk-reply"></p>
+          <p id="spoken-description"></p>
+          <div id="search-output" hidden>
+            <p id="search-result" role="status">Choose an object to look for.</p>
+            <p id="search-alignment" class="detection-help" role="status"></p>
+            <p id="search-request" class="detection-help"></p>
+            <p id="search-evidence"></p>
+            <img id="search-match" alt="Stationary camera image used to confirm the likely match" hidden>
+            <p id="search-image-note" class="detection-help" hidden>Matched snapshot · check this image yourself. The live view is beside it.</p>
+          </div>
+        </div>
+        <div id="conversation-controls">
+        <p id="talk-status" role="status">Connecting to conversation…</p>
+        <form id="talk-form">
+          <label class="sr-only" for="talk-prompt">Type a question</label>
+          <textarea id="talk-prompt" rows="2" maxlength="500" placeholder="Ask about what the robot sees…" aria-describedby="text-prompt-help"></textarea>
+          <div class="compose-footer"><p id="text-prompt-help">Enter to send · Shift+Enter for a new line</p><button id="send-prompt" class="claim" type="submit" disabled>Send question <span aria-hidden="true">↗</span></button></div>
+        </form>
+        <div class="speech-controls">
+          <button id="talk" class="claim" type="button" aria-pressed="false" aria-describedby="talk-help" disabled>Hold to talk</button>
+          <button id="end-conversation" class="text-button" type="button" disabled>End conversation</button>
+        </div>
+        <p class="privacy-note">Sends your question + a camera image to OpenAI. Replies play through the robot’s mouth.</p>
+        <details class="conversation-help">
+          <summary>How conversation works</summary>
+          <p id="talk-help">Speak near the robot while holding the button, then release to send. Up to 15 seconds per recording or 500 characters per typed question. Keyboard: focus Hold to talk and hold Enter.</p>
+          <p>Typed questions do not record the microphone. End conversation stops the reply and clears its context. Leaving the page cancels the turn. Remembers up to six questions; clears after two idle minutes.</p>
+          <p>Requires internet and paid API usage. Audio and images stay in memory on the Pi, not in recording files. This mode does not control movement. Preview and offline descriptions stay local.</p>
+        </details>
+        </div>
+        <div id="search-controls" hidden>
+          <p id="search-progress" class="search-progress" role="status">Connecting to search…</p>
+          <form id="search-form">
+            <label for="search-target">What should I find?</label>
+            <input id="search-target" type="text" maxlength="500" placeholder="Find something red I could drink from…" autocomplete="off" aria-describedby="search-help">
+            <label class="search-arm"><input id="search-arm" type="checkbox"> Allow short turns to find and centre</label>
+            <div class="speech-controls"><button id="start-search" class="claim" type="submit" disabled>Find from text</button><button id="search-voice" class="text-button" type="button" aria-pressed="false" disabled>Hold to give a clue</button><button id="cancel-search" class="text-button" type="button" disabled>Stop search</button></div>
+          </form>
+          <p id="search-help" class="privacy-note">Type a clue or hold the button and speak near the robot, then release to search. It turns to find and centre a match, then speaks. Keep the area clear; no obstacle sensing.</p>
+          <details class="conversation-help"><summary>Search limits and privacy</summary><p>Your typed clue or released recording, search criteria and checked images go to OpenAI (paid API usage). Clues are limited to 500 characters or 15 seconds of recording. The robot stays stopped while interpreting; an unclear clue prompts a question. Finds and clarification questions use an AI-generated voice. Audio and photos stay in memory on the Pi. Search allows at most 8 short search turns, 6 centring turns and 20 image checks within 90 seconds, including recording and interpretation. Search turns last 0.3 seconds; centring turns last 0.12 seconds, at slow speed. A match and a centred view each need two stationary image checks. Uncertain or lost targets stop centring. It does not approach the object; wheel angles and a full-circle sweep are not measured. STOP, leaving the page, lost video or disconnection cancels the search.</p></details>
+        </div>
+      </section>
+      <section class="controls-panel" aria-label="Driving controls">
+        <div class="drive-overview">
+          <p class="eyebrow">MANUAL CONTROL</p>
+          <h2>Drive the robot</h2>
+          <div id="mode" class="mode">Checking robot…</div>
+          <button id="claim" class="claim" disabled>Take control</button>
+          <div class="command"><span>LAST COMMAND</span><strong id="command">—</strong></div>
+          <p id="notice" class="notice" role="status" aria-live="polite">Waiting for connection.</p>
+        </div>
+        <div class="drive-settings">
+          <label class="speed-label" for="speed">Test speed</label>
+          <select id="speed" aria-describedby="speed-help" disabled>
+            <option value="slow">Slow · normal driving</option>
+            <option value="full">Full speed · 2-second test</option>
+          </select>
+          <p id="speed-help" class="speed-help">For full speed, lift both wheels off the ground. Select a speed before taking control, then briefly hold forward or backward.</p>
+          <details class="calibration">
+            <summary>Adjust slow wheel speeds</summary>
+            <p class="speed-help">Lower numbers reduce the command strength. Adjust the faster wheel by one step, then compare again. Test one direction at a time with wheels raised.</p>
+            <fieldset id="calibration-fields" disabled>
+              <legend>Slow-speed settings (6–24)</legend>
+              <div class="calibration-grid">
+                <label>Left forward<input id="left_forward" type="number" min="6" max="24" step="1" value="12"></label>
+                <label>Right forward<input id="right_forward" type="number" min="6" max="24" step="1" value="12"></label>
+                <label>Left reverse<input id="left_backward" type="number" min="6" max="24" step="1" value="12"></label>
+                <label>Right reverse<input id="right_backward" type="number" min="6" max="24" step="1" value="12"></label>
+              </div>
+              <button id="apply-calibration" class="text-button" type="button">Save wheel settings</button>
+              <button id="reset-calibration" class="text-button" type="button">Reset all to 12</button>
+            </fieldset>
+            <p id="calibration-notice" class="speed-help" role="status">Press Stop before editing. Saved settings apply to slow mode only.</p>
+          </details>
+        </div>
+        <div class="drive-pad">
+          <div class="dpad" aria-label="Direction pad">
+            <button data-direction="forward" class="direction forward" aria-label="Move forward" disabled><span aria-hidden="true">↑</span><small>FORWARD</small></button>
+            <button data-direction="left" class="direction left" aria-label="Turn left" disabled><span aria-hidden="true">←</span><small>LEFT</small></button>
+            <div class="pad-center" aria-hidden="true">✦</div>
+            <button data-direction="right" class="direction right" aria-label="Turn right" disabled><span aria-hidden="true">→</span><small>RIGHT</small></button>
+            <button data-direction="backward" class="direction backward" aria-label="Move backward" disabled><span aria-hidden="true">↓</span><small>BACK</small></button>
+          </div>
+          <p class="drive-tip">Hold arrows or WASD. Combine directions to curve.<br>Release to stop.</p>
+        </div>
+      </section>
+      <details class="vision-tools">
+        <summary>Offline descriptions <span class="muted">· Coral detections, no API</span></summary>
+        <div class="vision-content">
+          <p class="detection-help">Speak the detected object names and counts. Predictions may be incorrect or miss objects. The description appears in Robot response above.</p>
           <div class="speech-controls" role="group" aria-label="Spoken descriptions">
             <button id="describe" class="text-button" type="button" disabled>Describe what I see</button>
             <button id="stop-speaking" class="text-button" type="button" disabled>Stop speaking</button>
           </div>
-          <label class="llm-option"><input id="use-llm" type="checkbox" checked disabled> Use local LLM</label>
-          <p class="detection-help">LLM wording uses detected names and counts. Loading may take 20–30 seconds. Uncheck for a faster basic description.</p>
-          <p id="description-source" class="detection-help"></p>
           <p id="speech-status" class="detection-help" role="status">Connecting to speech…</p>
-          <p id="spoken-description"></p>
         </div>
-      </section>
-      <section class="controls-panel" aria-label="Driving controls">
-        <p class="eyebrow">YOU’RE IN THE DRIVER’S SEAT</p>
-        <h2>A little push.<br>A new perspective.</h2>
-        <p class="intro">Hold ↑ + → to curve right.<br>Release all directions to stop.</p>
-        <div id="mode" class="mode">Checking robot…</div>
-        <label class="speed-label" for="speed">Test speed</label>
-        <select id="speed" aria-describedby="speed-help" disabled>
-          <option value="slow">Slow · normal driving</option>
-          <option value="full">Full speed · 2-second test</option>
-        </select>
-        <p id="speed-help" class="speed-help">For full speed, lift both wheels off the ground. Select a speed before taking control, then briefly hold forward or backward.</p>
-        <details class="calibration">
-          <summary>Adjust slow wheel speeds</summary>
-          <p class="speed-help">Lower numbers reduce the command strength. Adjust the faster wheel by one step, then compare again. Test one direction at a time with wheels raised.</p>
-          <fieldset id="calibration-fields" disabled>
-            <legend>Slow-speed settings (6–24)</legend>
-            <div class="calibration-grid">
-              <label>Left forward<input id="left_forward" type="number" min="6" max="24" step="1" value="12"></label>
-              <label>Right forward<input id="right_forward" type="number" min="6" max="24" step="1" value="12"></label>
-              <label>Left reverse<input id="left_backward" type="number" min="6" max="24" step="1" value="12"></label>
-              <label>Right reverse<input id="right_backward" type="number" min="6" max="24" step="1" value="12"></label>
-            </div>
-            <button id="apply-calibration" class="text-button" type="button">Save wheel settings</button>
-            <button id="reset-calibration" class="text-button" type="button">Reset all to 12</button>
-          </fieldset>
-          <p id="calibration-notice" class="speed-help" role="status">Press Stop before editing. Saved settings apply to slow mode only.</p>
-        </details>
-        <button id="claim" class="claim" disabled>Take control</button>
-        <div class="dpad" aria-label="Direction pad">
-          <button data-direction="forward" class="direction forward" aria-label="Move forward" disabled><span aria-hidden="true">↑</span><small>FORWARD</small></button>
-          <button data-direction="left" class="direction left" aria-label="Turn left" disabled><span aria-hidden="true">←</span><small>LEFT</small></button>
-          <div class="pad-center" aria-hidden="true">✦</div>
-          <button data-direction="right" class="direction right" aria-label="Turn right" disabled><span aria-hidden="true">→</span><small>RIGHT</small></button>
-          <button data-direction="backward" class="direction backward" aria-label="Move backward" disabled><span aria-hidden="true">↓</span><small>BACK</small></button>
-        </div>
-        <button id="stop" class="stop"><span aria-hidden="true">■</span> STOP <kbd>SPACE</kbd></button>
-        <div class="command"><span>LAST COMMAND SENT</span><strong id="command">—</strong></div>
-        <p id="notice" class="notice" role="status" aria-live="polite">Waiting for connection.</p>
-      </section>
+      </details>
     </div>
-    <footer><span><b>Try it:</b> hold forward + left or right to steer. Two fingers work too.</span><span>Arrow keys or WASD <span class="separator">·</span> One driver at a time</span></footer>
+    <footer><span>NB3 / THE LAST BLACK BOX</span><span>One driver at a time · STOP is always available</span></footer>
   </main>
 </body>
 </html>

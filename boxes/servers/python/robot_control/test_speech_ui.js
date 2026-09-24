@@ -35,17 +35,6 @@ async function main() {
   controls.render({...reply, ready:false, error:"NB3 mouth not available"}, true);
   assert.equal(element("describe").disabled, true);
   assert.match(element("speech-status").textContent, /mouth not available/);
-  reply = {...reply, llm_enabled:true, ready:true, speaking:true, phase:"thinking"};
-  controls.render(reply, true);
-  assert.match(element("speech-status").textContent, /LLM is writing/);
-  assert.equal(element("stop-speaking").textContent, "Cancel description");
-  assert.equal(element("use-llm").disabled, true);
-  controls.render({...reply, speaking:false, source:"fallback", detail:"Scene changed"}, true);
-  assert.match(element("description-source").textContent, /Scene changed/);
-  fail = false;
-  element("use-llm").checked = true;
-  await element("describe").click();
-  assert.equal(requests.at(-1).body.use_llm, true);
   assert(requests.every(request => request.path.startsWith('/api/speech/')));
   console.log("Speech UI passed: describe, stop, transcript, stale/device errors, no motor requests.");
 }
