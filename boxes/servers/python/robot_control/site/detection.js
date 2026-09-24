@@ -1,5 +1,46 @@
 "use strict";
 
+class DetectionControls {
+  constructor(checkbox, api, changed) {
+    this.checkbox = checkbox;
+    this.api = api;
+    this.changed = changed;
+    this.state = null;
+    this.pending = false;
+    this.error = '';
+    checkbox.addEventListener('change', () => this.toggle());
+  }
+
+  update(state) {
+    if (state && (!this.state?.at || !state.at || state.at >= this.state.at)) {
+      this.state = state;
+      this.error = '';
+    }
+  }
+
+  render(online) {
+    this.online = online;
+    this.checkbox.disabled = !online || !this.state?.available || this.pending;
+    if (!this.pending && this.state) this.checkbox.checked = Boolean(this.state.enabled);
+  }
+
+  async toggle() {
+    if (this.pending || !this.state?.available) return;
+    const enabled = this.checkbox.checked;
+    this.pending = true;
+    this.error = '';
+    this.changed();
+    try {
+      this.update(await this.api('/api/detections', {enabled}));
+    } catch (_) {
+      this.error = 'Could not change NPU state. Check the connection and try again.';
+    } finally {
+      this.pending = false;
+      this.changed();
+    }
+  }
+}
+
 // Boxes use normalized coordinates from the exact JPEG shown underneath.
 function detectionBox(box, flipped, width, height) {
   const [x1, y1, x2, y2] = box;
@@ -22,10 +63,31 @@ class DetectionOverlay {
     this.result = result;
   }
 
-  render(enabled, fresh, flipped) {
+  render(enabled, fresh, flipped, control = null) {
     const ctx = this.context, width = this.canvas.width, height = this.canvas.height;
     ctx.clearRect(0, 0, width, height);
     this.badge.className = "badge";
+    if (control?.online === false) {
+      this.badge.textContent = 'NPU status unknown';
+      this.summary.textContent = 'Reconnect to check or change detection processing.';
+      return;
+    }
+    if (control?.pending || control?.error) {
+      this.badge.textContent = control.error ? 'NPU control unavailable' : 'Updating NPU…';
+      this.summary.textContent = control.error || 'Changing detection processing on the robot.';
+      return;
+    }
+    if (control?.state?.available && !control.state.enabled) {
+      this.badge.textContent = control.state.running ? 'Pausing NPU…' : 'NPU paused';
+      this.summary.textContent = control.state.running ? 'Stopping the Coral worker…'
+        : 'Coral processing is paused. Camera, conversation and object search remain available.';
+      return;
+    }
+    if (control?.state && !control.state.available) {
+      this.badge.textContent = 'Detection not enabled';
+      this.summary.textContent = 'Start the website with --detect to use the Coral NPU.';
+      return;
+    }
     if (!enabled) {
       this.badge.textContent = "Detection hidden";
       this.summary.textContent = "Show detections to see object labels.";
@@ -66,4 +128,4 @@ class DetectionOverlay {
   }
 }
 
-if (typeof module !== "undefined") module.exports = {DetectionOverlay, detectionBox};
+if (typeof module !== "undefined") module.exports = {DetectionControls, DetectionOverlay, detectionBox};

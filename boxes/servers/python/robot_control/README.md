@@ -46,11 +46,21 @@ Start the website with detection enabled:
 /usr/bin/python3 boxes/servers/python/robot_control/server.py --serial /dev/ttyUSB0 --detect
 ```
 
-Run only one server at a time. Refresh the website and leave **Show detections**
+Run only one server at a time. Refresh the website and leave **Detections**
 checked. Green boxes show object names and confidence scores, with a count below
 the camera. Try a person, cup, bottle, or chair in good light. **Coral live**
 confirms inference is running even if no objects exceed the 50% threshold.
-Uncheck the box for the faster raw camera preview. **Flip vertically** flips the
+Uncheck the box to **pause Coral NPU processing** and use the faster raw camera
+preview. The badge shows **Pausing NPU…** until the worker exits, then **NPU paused**.
+This releases the worker's USB connection and clears its old results; it does not
+cut USB power. Check the box again to load the model in a new worker and resume.
+The setting is shared by all viewers: refreshing or opening another page reflects
+the current state without enabling it again. Starting the server with `--detect`
+enables detection again; closing the browser alone does not pause it.
+
+Pausing keeps the camera, driving, API conversation and API object search available.
+The local **Describe what I see** feature requires fresh Coral detections and asks
+you to resume first. **Flip vertically** flips the
 display and boxes together; it does not change the image sent to the model.
 
 This uses Google's Edge TPU SSD MobileNet V2 model trained on COCO's 80 common

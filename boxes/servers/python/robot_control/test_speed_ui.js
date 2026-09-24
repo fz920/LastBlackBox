@@ -32,7 +32,8 @@ async function main() {
   const window = new Element();
   const requests = [];
   const defaults = {left_forward: 12, right_forward: 12, left_backward: 12, right_backward: 12};
-  let status = {mode: "robot", speed: "slow", busy: false, command: "stop", camera_live: true, calibration: defaults};
+  let status = {mode: "robot", speed: "slow", busy: false, command: "stop", camera_live: true, calibration: defaults,
+    detection: {available:true, enabled:true, running:true, at:1}};
   const context = vm.createContext({
     document: {getElementById: element, querySelectorAll: () => buttons, addEventListener() {}, hidden: false},
     window, performance: {now: () => 1000}, AbortSignal,
@@ -42,7 +43,10 @@ async function main() {
       const body = options.body === undefined ? undefined : JSON.parse(options.body);
       requests.push({path, body});
       let reply;
-      if (path === "/api/claim") {
+      if (path === '/api/detections') {
+        status.detection = {...status.detection, enabled:body.enabled, running:body.enabled, at:status.detection.at+1};
+        reply = {...status.detection};
+      } else if (path === "/api/claim") {
         status = {...status, busy: true, speed: body.speed};
         reply = {token: "test-driver"};
       } else {
@@ -59,6 +63,14 @@ async function main() {
   const settle = () => new Promise(resolve => setImmediate(resolve));
   await settle();
   vm.runInContext("lastVideo = 1000; frameTime = 1; render()", context);
+  for (const enabled of [false, true]) {
+    element('show-detections').checked = enabled;
+    await element('show-detections').listeners.change();
+    assert.equal(status.detection.enabled, enabled);
+    assert.equal(element('show-detections').checked, enabled);
+    assert.equal(status.command, 'stop');
+  }
+  assert.equal(requests.filter(request => request.path === '/api/detections').length, 2);
   assert.equal(element("speed").value, "slow");
   assert.equal(element("speed").disabled, false);
   element("speed").value = "full";

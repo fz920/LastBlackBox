@@ -314,10 +314,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == "/api/status":
+            detector = getattr(self.server, "detector", None)
             speech = getattr(self.server, "speech", None)
             talk = getattr(self.server, "talk", None)
             search = getattr(self.server, "search", None)
             return self.reply(200, {**self.server.controller.status(),
+                "detection": detector.snapshot()[1] if detector else {"available": False, "enabled": False},
                 "speech": speech.status() if speech else {"enabled": False},
                 "talk": talk.status() if talk else {"enabled": False},
                 "search": search.status() if search else {"enabled": False}})
@@ -376,6 +378,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Expected a JSON object")
             path = urlsplit(self.path).path
             controller = self.server.controller
+            if path == '/api/detections':
+                detector = getattr(self.server, 'detector', None)
+                if not detector:
+                    raise ValueError('Start the server with --detect to enable the NPU.')
+                return self.reply(200, detector.set_enabled(body.get('enabled')))
             if path.startswith('/api/search/'):
                 search = getattr(self.server, 'search', None)
                 if not search:

@@ -97,6 +97,13 @@ class SpeechTests(unittest.TestCase):
             self.speech.describe()
         self.assertFalse(self.speech.busy)
 
+    def test_paused_detection_does_not_speak_old_objects_or_resume_npu(self):
+        self.detector.set_enabled(False)
+        with self.assertRaisesRegex(ValueError, 'Coral is paused'):
+            self.speech.describe()
+        self.assertFalse(self.speech.busy)
+        self.assertFalse(self.detector.enabled)
+
     def test_playback_error_visible_and_allows_retry(self):
         with patch.object(self.speech, '_command', side_effect=OSError('Audio device busy')):
             self.speech.describe()

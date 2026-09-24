@@ -1,15 +1,37 @@
 """Detection geometry, freshness, worker isolation, and HTTP frame alignment."""
 import json
+import select
 import sys
 import threading
 import time
 import unittest
 from http.server import ThreadingHTTPServer
-from urllib.request import urlopen
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from detection import Detection
 from detection_worker import decode_objects
 from server import Frames, Controller, Handler
+
+WORKER = '''
+import sys, struct, json
+print(json.dumps({'ready': True}), flush=True)
+while True:
+    header=sys.stdin.buffer.read(4)
+    if not header: break
+    size=struct.unpack('!I', header)[0]
+    sys.stdin.buffer.read(size)
+    print(json.dumps({'objects': [], 'width': 640, 'height': 480, 'inference_ms': 1}), flush=True)
+'''
+
+
+def wait_for(predicate):
+    deadline = time.monotonic() + 3
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError('Detector did not reach the expected state')
+        time.sleep(.01)
 
 
 class DecodeTests(unittest.TestCase):
@@ -28,6 +50,90 @@ class DecodeTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.TestCase):
+    def worker(self, script=WORKER, payload=b'first JPEG'):
+        frames = Frames(); frames.write(payload)
+        detector = Detection(frames, '', '', '')
+        detector.command = [sys.executable, '-u', '-c', script]
+        self.addCleanup(detector.close)
+        detector.start()
+        return detector
+
+    def test_pause_reaps_worker_clears_results_and_resume_uses_new_frames(self):
+        detector = self.worker()
+        wait_for(lambda: detector.snapshot()[1]['live'])
+        old = detector.process
+        status = detector.set_enabled(False)
+        self.assertFalse(status['enabled'])
+        self.assertEqual(status['objects'], [])
+        wait_for(lambda: detector.process is None)
+        self.assertIsNotNone(old.poll())
+        detector.frames.write(b'camera while paused')
+        time.sleep(.25)
+        self.assertIsNone(detector.process)
+        self.assertIsNone(detector.snapshot()[0])
+        detector.set_enabled(True)
+        wait_for(lambda: detector.snapshot()[1]['live'])
+        self.assertNotEqual(detector.process.pid, old.pid)
+        self.assertEqual(detector.snapshot()[0]['jpeg'], b'camera while paused')
+        current = detector.process
+        detector.set_enabled(True)
+        self.assertIs(detector.process, current)
+
+    def test_pause_during_startup_and_immediate_resume_do_not_reuse_worker(self):
+        detector = self.worker('import time; time.sleep(30)')
+        wait_for(lambda: detector.process is not None)
+        old = detector.process
+        detector.set_enabled(False)
+        detector.command = [sys.executable, '-u', '-c', WORKER]
+        detector.set_enabled(True)
+        wait_for(lambda: detector.snapshot()[1]['live'])
+        self.assertIsNotNone(old.poll())
+        self.assertNotEqual(detector.process.pid, old.pid)
+        self.assertEqual(detector.error, '')
+
+    def test_pause_interrupts_pending_inference_and_close_while_paused_exits(self):
+        detector = self.worker("import time; print('{\"ready\":true}', flush=True); time.sleep(30)")
+        wait_for(lambda: detector.process is not None)
+        old = detector.process
+        time.sleep(.1)
+        detector.set_enabled(False)
+        wait_for(lambda: detector.process is None)
+        self.assertIsNotNone(old.poll())
+        self.assertEqual(detector.snapshot()[1]['error'], '')
+        detector.close()
+        self.assertFalse(detector.thread.is_alive())
+        with self.assertRaises(ValueError): detector.set_enabled(True)
+
+    def test_resume_interrupts_error_retry_delay(self):
+        detector = self.worker('raise SystemExit(1)')
+        wait_for(lambda: detector.error.startswith('Coral worker stopped'))
+        detector.set_enabled(False)
+        detector.command = [sys.executable, '-u', '-c', WORKER]
+        detector.set_enabled(True)
+        wait_for(lambda: detector.snapshot()[1]['live'])
+        for value in (None, 'false', 0, 1):
+            with self.assertRaises(ValueError): detector.set_enabled(value)
+
+    def test_pause_kills_unresponsive_worker_even_with_full_input_pipe(self):
+        writing = threading.Event()
+        real_select = select.select
+        def selecting(readers, writers, errors, timeout):
+            if writers: writing.set()
+            return real_select(readers, writers, errors, timeout)
+        with patch('detection.select.select', side_effect=selecting):
+            detector = self.worker("""
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print('{"ready":true}', flush=True)
+time.sleep(30)
+""", payload=b'x' * 128000)
+            self.assertTrue(writing.wait(2))
+            old = detector.process
+            detector.set_enabled(False)
+            wait_for(lambda: detector.process is None)
+            self.assertIsNotNone(old.poll())
+            self.assertFalse(detector.snapshot()[1]['running'])
+
     def test_stale_results_clear_objects(self):
         detector = Detection(Frames(), '', '', '', clock=lambda: 10)
         detector.error = ''
@@ -128,6 +234,33 @@ class DetectionHTTPTests(unittest.TestCase):
             status = json.load(response)
             self.assertFalse(status['live'])
             self.assertEqual(status['objects'], [])
+
+    def test_toggle_requires_same_origin_and_boolean_and_preserves_raw_camera(self):
+        def post(body, headers):
+            request = Request(f'http://127.0.0.1:{self.http.server_port}/api/detections',
+                              data=json.dumps(body).encode(), headers=headers)
+            try: response = urlopen(request, timeout=2)
+            except HTTPError as exc: response = exc
+            with response: return response.status, json.load(response)
+        self.assertEqual(post({'enabled': False}, {})[0], 403)
+        self.assertEqual(post({'enabled': False}, {'X-Robot-Control': '1', 'Origin': 'http://elsewhere'})[0], 403)
+        for value in (None, 'false', 0):
+            self.assertEqual(post({'enabled': value}, {'X-Robot-Control': '1'})[0], 409)
+        code, status = post({'enabled': False}, {'X-Robot-Control': '1'})
+        self.assertEqual(code, 200)
+        self.assertFalse(status['enabled'])
+        with self.get('/api/frame?detect=1') as response:
+            self.assertEqual(response.read(), b'new raw image')
+            self.assertIsNone(response.headers.get('X-Detections'))
+        with self.get('/api/status') as response:
+            self.assertFalse(json.load(response)['detection']['enabled'])
+        # GETs from another viewer never turn detection back on.
+        self.assertFalse(self.detector.enabled)
+        code, status = post({'enabled': True}, {'X-Robot-Control': '1'})
+        self.assertEqual(code, 200)
+        self.assertTrue(status['enabled'])
+        self.assertFalse(status['live'])
+        self.assertEqual(self.http.controller.command, 'stop')
 
 
 if __name__ == '__main__':

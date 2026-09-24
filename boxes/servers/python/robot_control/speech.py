@@ -92,7 +92,9 @@ class Speech:
             device, error = self._configuration()
             if error:
                 raise ValueError(error)
-            result, _ = self.detector.snapshot() if self.detector else (None, None)
+            result, detection = self.detector.snapshot() if self.detector else (None, None)
+            if detection and not detection['enabled']:
+                raise ValueError('Coral is paused. Enable Detections before describing its objects.')
             if result is None:
                 raise ValueError('Wait for fresh Coral detections before describing the scene.')
             return self._begin(describe_objects(result['objects']), device)

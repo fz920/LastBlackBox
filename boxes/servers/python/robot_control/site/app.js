@@ -5,6 +5,11 @@ let token = null, sequence = 0, desired = "stop", online = false, claiming = fal
 let state = null, lastVideo = 0, frameTime = 0, frameNumber = 0, objectURL = null;
 const steering = new SteeringInput();
 const detectionOverlay = new DetectionOverlay($("detections"), $("detection-status"), $("detection-summary"));
+const detectionControls = new DetectionControls($("show-detections"), api, () => {
+  videoRequestMode = null;
+  detectionOverlay.update('starting', null);
+  render();
+});
 const speechControls = new SpeechControls($, api);
 const talkControls = new TalkControls($, api);
 const searchControls = new SearchControls($, api,
@@ -29,7 +34,8 @@ function render() {
   talkControls.render(undefined, online);
   searchControls.render(undefined, online);
   speechControls.render(undefined, online, talkControls.state?.busy);
-  detectionOverlay.render($("show-detections").checked, fresh(), $("camera").classList.contains("flipped"));
+  detectionControls.render(online);
+  detectionOverlay.render($("show-detections").checked, fresh(), $("camera").classList.contains("flipped"), detectionControls);
   $("connection").textContent = online ? "Robot connected" : "Disconnected";
   $("connection").className = `badge ${online ? "good" : "bad"}`;
   $("live").textContent = fresh() ? "Live" : "Video paused";
@@ -191,11 +197,6 @@ $("flip").addEventListener("click", () => {
   $("flip").textContent = flipped ? "Reset orientation" : "Flip vertically";
   render();
 });
-$("show-detections").addEventListener("change", () => {
-  videoRequestMode = null;
-  detectionOverlay.update("starting", null);
-  render();
-});
 window.addEventListener("blur", () => {talkControls.cancel(); searchControls.cancel(); if (token) emergencyStop("Window lost focus. Take control to continue.");});
 document.addEventListener("visibilitychange", () => {if (document.hidden) {talkControls.cancel(); searchControls.cancel();} if (document.hidden && token) emergencyStop("Control released while away.");});
 window.addEventListener("pagehide", () => {talkControls.cancel(); searchControls.cancel(); if (token) emergencyStop();});
@@ -204,6 +205,7 @@ async function statusLoop() {
   try {
     state = await api("/api/status");
     online = true;
+    detectionControls.update(state.detection);
     talkControls.render(state.talk, online);
     searchControls.render(state.search, online);
     speechControls.render(state.speech, online, state.talk?.busy);
